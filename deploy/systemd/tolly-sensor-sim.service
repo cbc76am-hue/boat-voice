@@ -1,0 +1,13 @@
+[Unit]
+Description=Tolly — Synthetic Signal K sensor data over MQTT (dev only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/boat/boat-voice/scripts/tolly_sensor_sim.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

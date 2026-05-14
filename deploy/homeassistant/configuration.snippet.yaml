@@ -1,0 +1,68 @@
+
+# ---------------------------------------------------------------------------
+# Tolly — boat voice assistant (see /home/boat/boat-voice and BOAT_VOICE_PLAN.md)
+# ---------------------------------------------------------------------------
+rest_command:
+  tolly_talk:
+    url: "http://127.0.0.1:8765/talk"
+    method: POST
+  tolly_conversation_mode:
+    url: "http://127.0.0.1:8765/conversation_mode"
+    method: POST
+    content_type: "application/json"
+    payload: '{"active": {{ active }}}'
+
+input_boolean:
+  tolly_conversation_mode:
+    name: "Tolly conversation mode"
+    icon: mdi:chat-processing
+
+rest:
+  - resource: "http://127.0.0.1:8765/healthz"
+    method: GET
+    scan_interval: 30
+    timeout: 5
+    sensor:
+      - name: "Tolly health raw"
+        unique_id: tolly_health_raw
+        value_template: "{{ value_json.healthy }}"
+        json_attributes:
+          - mic
+          - speaker
+          - ha_reachable
+          - gemini_reachable
+          - model
+          - model_valid
+          - exposed_entity_count
+          - conv_mode_active
+          - uptime_s
+
+template:
+  - binary_sensor:
+      - name: "Tolly healthy"
+        unique_id: tolly_healthy
+        state: "{{ states('sensor.tolly_health_raw') | lower == 'true' }}"
+        availability: "{{ states('sensor.tolly_health_raw') not in ['unknown','unavailable'] }}"
+        device_class: connectivity
+        attributes:
+          mic: "{{ state_attr('sensor.tolly_health_raw', 'mic') }}"
+          speaker: "{{ state_attr('sensor.tolly_health_raw', 'speaker') }}"
+          ha_reachable: "{{ state_attr('sensor.tolly_health_raw', 'ha_reachable') }}"
+          gemini_reachable: "{{ state_attr('sensor.tolly_health_raw', 'gemini_reachable') }}"
+          model: "{{ state_attr('sensor.tolly_health_raw', 'model') }}"
+          model_valid: "{{ state_attr('sensor.tolly_health_raw', 'model_valid') }}"
+          exposed_entity_count: "{{ state_attr('sensor.tolly_health_raw', 'exposed_entity_count') }}"
+          conv_mode_active: "{{ state_attr('sensor.tolly_health_raw', 'conv_mode_active') }}"
+          uptime_s: "{{ state_attr('sensor.tolly_health_raw', 'uptime_s') }}"
+
+lovelace:
+  mode: storage
+  dashboards:
+    lovelace-tolly:
+      mode: yaml
+      filename: dashboards/tolly.yaml
+      title: Tolly
+      icon: mdi:microphone
+      show_in_sidebar: true
+      require_admin: false
+

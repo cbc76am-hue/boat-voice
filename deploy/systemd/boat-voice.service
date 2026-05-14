@@ -1,0 +1,16 @@
+[Unit]
+Description=Tolly — Boat Voice Assistant (Gemini Live)
+After=network-online.target pipewire.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/boat/boat-voice/venv/bin/python -m boat_voice
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# PipeWire socket discovery: systemd --user already exports XDG_RUNTIME_DIR
+# and DBUS_SESSION_BUS_ADDRESS, which sounddevice + PipeWire need.
+
+[Install]
+WantedBy=default.target

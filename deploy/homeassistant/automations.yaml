@@ -1,0 +1,44 @@
+- id: tolly_conversation_mode_toggle
+  alias: "Tolly: sync conversation_mode toggle to service"
+  trigger:
+    - platform: state
+      entity_id: input_boolean.tolly_conversation_mode
+  condition:
+    - condition: template
+      value_template: "{{ trigger.to_state.state in ['on','off'] }}"
+  action:
+    - service: rest_command.tolly_conversation_mode
+      data:
+        active: "{{ is_state('input_boolean.tolly_conversation_mode', 'on') | lower }}"
+
+- id: tolly_unhealthy_alert
+  alias: "Tolly: notify when unhealthy"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.tolly_healthy
+      to: 'off'
+      for: '00:01:00'
+  action:
+    - service: persistent_notification.create
+      data:
+        notification_id: tolly_unhealthy
+        title: "Tolly is unhealthy"
+        message: >
+          /healthz failed for over a minute.
+          mic={{ state_attr('binary_sensor.tolly_healthy','mic') }},
+          speaker={{ state_attr('binary_sensor.tolly_healthy','speaker') }},
+          ha={{ state_attr('binary_sensor.tolly_healthy','ha_reachable') }},
+          gemini={{ state_attr('binary_sensor.tolly_healthy','gemini_reachable') }},
+          model={{ state_attr('binary_sensor.tolly_healthy','model') }} (valid={{ state_attr('binary_sensor.tolly_healthy','model_valid') }}),
+          exposed_entities={{ state_attr('binary_sensor.tolly_healthy','exposed_entity_count') }}
+
+- id: tolly_healthy_clear
+  alias: "Tolly: clear unhealthy notification on recovery"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.tolly_healthy
+      to: 'on'
+  action:
+    - service: persistent_notification.dismiss
+      data:
+        notification_id: tolly_unhealthy
