@@ -1,0 +1,19 @@
+[project]
+name = "boat-voice"
+version = "0.1.0"
+description = "Tolly — Boat voice assistant for the Tollycraft"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.0.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24",
+    "aiohttp>=3.9",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["boat_voice*"]
