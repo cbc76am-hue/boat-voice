@@ -1,0 +1,36 @@
+--- src/dashboard_pi.cpp.bak-pre-debug	2026-05-16 11:53:18.675246902 -0700
++++ src/dashboard_pi.cpp	2026-05-16 13:46:08.706516803 -0700
+@@ -605,17 +605,22 @@
+ // One of those FFS moments
+ // Have to know the type of the value before retrieving.
+ double dashboard_pi::GetJsonDouble(wxJSONValue &value) {
+-	double d_ret;
+-	if (value.IsDouble()) {
+-		return d_ret = value.AsDouble();
+-	}
+-	else if (value.IsInt()) {
+-		int i_ret = value.AsInt();
+-		return d_ret = i_ret;
+-	}
+-	else {
+-		return nan("");
+-	}
++	// Handle all numeric wxJSON types. Original implementation only checked
++	// IsDouble/IsInt, returning NaN for integers stored as wxJSON's wider
++	// types like Int64 — which is how oilPressure (200000 Pa) gets stored.
++	// That broke every gauge fed from canboatjs PGN 127489 paths.
++	if (value.IsDouble()) return value.AsDouble();
++	if (value.IsInt32())  return (double)value.AsInt32();
++	if (value.IsInt64())  return (double)value.AsInt64();
++	if (value.IsUInt32()) return (double)value.AsUInt32();
++	if (value.IsUInt64()) return (double)value.AsUInt64();
++	if (value.IsInt())    return (double)value.AsInt();
++	if (value.IsUInt())   return (double)value.AsUInt();
++	if (value.IsLong())   return (double)value.AsLong();
++	if (value.IsULong())  return (double)value.AsULong();
++	if (value.IsShort())  return (double)value.AsShort();
++	if (value.IsUShort()) return (double)value.AsUShort();
++	return nan("");
+ }
+ 
+ // Receive & handle SignalK derived data
