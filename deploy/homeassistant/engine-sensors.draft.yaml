@@ -1,0 +1,114 @@
+# HA MQTT sensors for the engine bus.
+# DEPLOY when real engine data flows from Signal K (RH-02 Pro + j-box + engine harnesses installed).
+# Append the `mqtt:` block to /config/configuration.yaml inside the homeassistant container.
+#
+# SK publishes Hz internally; we multiply by 60 in the template to display RPM.
+# Coolant temperature in Kelvin from SK → °F displayed (HA's device_class temperature handles user pref).
+
+mqtt:
+  sensor:
+    # ---- Port engine ----
+    - name: "Port Engine RPM"
+      unique_id: tolly_port_rpm
+      state_topic: "vessels/self/propulsion/port/revolutions"
+      unit_of_measurement: "RPM"
+      state_class: measurement
+      value_template: "{{ (value | float * 60) | round(0) }}"
+
+    - name: "Port Coolant Temp"
+      unique_id: tolly_port_coolant
+      state_topic: "vessels/self/propulsion/port/coolantTemperature"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      value_template: "{{ (value | float - 273.15) | round(1) }}"
+
+    - name: "Port Oil Pressure"
+      unique_id: tolly_port_oil_pressure
+      state_topic: "vessels/self/propulsion/port/oilPressure"
+      unit_of_measurement: "kPa"
+      device_class: pressure
+      state_class: measurement
+      value_template: "{{ (value | float / 1000) | round(0) }}"
+
+    - name: "Port Fuel Rate"
+      unique_id: tolly_port_fuel_rate
+      state_topic: "vessels/self/propulsion/port/fuel/rate"
+      unit_of_measurement: "L/h"
+      state_class: measurement
+      value_template: "{{ (value | float * 3600) | round(2) }}"
+
+    - name: "Port Run Time"
+      unique_id: tolly_port_runtime
+      state_topic: "vessels/self/propulsion/port/runTime"
+      unit_of_measurement: "h"
+      state_class: total_increasing
+      value_template: "{{ (value | float / 3600) | round(1) }}"
+
+    - name: "Port Engine Load"
+      unique_id: tolly_port_load
+      state_topic: "vessels/self/propulsion/port/engineLoad"
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: "{{ (value | float * 100) | round(0) }}"
+
+    - name: "Port Alternator"
+      unique_id: tolly_port_alt
+      state_topic: "vessels/self/propulsion/port/alternatorVoltage"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      value_template: "{{ value | float | round(2) }}"
+
+    # ---- Starboard engine — duplicate the block with stbd paths ----
+    - name: "Stbd Engine RPM"
+      unique_id: tolly_stbd_rpm
+      state_topic: "vessels/self/propulsion/starboard/revolutions"
+      unit_of_measurement: "RPM"
+      state_class: measurement
+      value_template: "{{ (value | float * 60) | round(0) }}"
+
+    - name: "Stbd Coolant Temp"
+      unique_id: tolly_stbd_coolant
+      state_topic: "vessels/self/propulsion/starboard/coolantTemperature"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      value_template: "{{ (value | float - 273.15) | round(1) }}"
+
+    - name: "Stbd Oil Pressure"
+      unique_id: tolly_stbd_oil_pressure
+      state_topic: "vessels/self/propulsion/starboard/oilPressure"
+      unit_of_measurement: "kPa"
+      device_class: pressure
+      state_class: measurement
+      value_template: "{{ (value | float / 1000) | round(0) }}"
+
+    - name: "Stbd Fuel Rate"
+      unique_id: tolly_stbd_fuel_rate
+      state_topic: "vessels/self/propulsion/starboard/fuel/rate"
+      unit_of_measurement: "L/h"
+      state_class: measurement
+      value_template: "{{ (value | float * 3600) | round(2) }}"
+
+    - name: "Stbd Run Time"
+      unique_id: tolly_stbd_runtime
+      state_topic: "vessels/self/propulsion/starboard/runTime"
+      unit_of_measurement: "h"
+      state_class: total_increasing
+      value_template: "{{ (value | float / 3600) | round(1) }}"
+
+    - name: "Stbd Engine Load"
+      unique_id: tolly_stbd_load
+      state_topic: "vessels/self/propulsion/starboard/engineLoad"
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: "{{ (value | float * 100) | round(0) }}"
+
+    - name: "Stbd Alternator"
+      unique_id: tolly_stbd_alt
+      state_topic: "vessels/self/propulsion/starboard/alternatorVoltage"
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      value_template: "{{ value | float | round(2) }}"

@@ -1,0 +1,13 @@
+[Unit]
+Description=Tolly — Synthetic engine data over SocketCAN (dev only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/boat/boat-voice/scripts/tolly_engine_can_sim.py vcan0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
