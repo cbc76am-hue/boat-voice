@@ -1,0 +1,326 @@
+title: Boat
+views:
+  # ============================================================
+  # View 1: AT A GLANCE — everything important on one screen
+  # ============================================================
+  - title: At a glance
+    path: glance
+    icon: mdi:sail-boat
+    cards:
+      # --- Tolly quick controls (top strip) ---
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Talk to Tolly
+            icon: mdi:microphone
+            icon_height: 70px
+            show_name: true
+            show_icon: true
+            tap_action:
+              action: call-service
+              service: rest_command.tolly_talk
+              data: {}
+          - type: entities
+            entities:
+              - entity: input_boolean.tolly_conversation_mode
+                name: Conversation mode
+              - entity: binary_sensor.tolly_healthy
+                name: Tolly health
+                icon: mdi:robot-happy
+
+      # --- ENGINES (horizontal split: Port | Starboard) ---
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "### Engines"
+          - type: horizontal-stack
+            cards:
+              # Port engine column
+              - type: vertical-stack
+                cards:
+                  - type: gauge
+                    entity: sensor.port_engine_rpm
+                    name: Port RPM
+                    min: 0
+                    max: 4500
+                    needle: true
+                    severity:
+                      green: 600
+                      yellow: 3500
+                      red: 4200
+                  - type: gauge
+                    entity: sensor.port_coolant_temp
+                    name: Port Coolant
+                    min: 100
+                    max: 230
+                    needle: true
+                    severity:
+                      green: 140
+                      yellow: 200
+                      red: 215
+                  - type: gauge
+                    entity: sensor.port_oil_pressure
+                    name: Port Oil Pressure
+                    min: 0
+                    max: 90
+                    needle: true
+                    severity:
+                      red: 0
+                      yellow: 20
+                      green: 35
+                  - type: glance
+                    entities:
+                      - entity: sensor.port_engine_load
+                        name: Load
+                      - entity: sensor.port_alternator
+                        name: Alt
+                      - entity: sensor.port_fuel_rate
+                        name: Fuel
+                      - entity: sensor.port_run_time
+                        name: Hours
+
+              # Starboard engine column
+              - type: vertical-stack
+                cards:
+                  - type: gauge
+                    entity: sensor.stbd_engine_rpm
+                    name: Stbd RPM
+                    min: 0
+                    max: 4500
+                    needle: true
+                    severity:
+                      green: 600
+                      yellow: 3500
+                      red: 4200
+                  - type: gauge
+                    entity: sensor.stbd_coolant_temp
+                    name: Stbd Coolant
+                    min: 100
+                    max: 230
+                    needle: true
+                    severity:
+                      green: 140
+                      yellow: 200
+                      red: 215
+                  - type: gauge
+                    entity: sensor.stbd_oil_pressure
+                    name: Stbd Oil Pressure
+                    min: 0
+                    max: 90
+                    needle: true
+                    severity:
+                      red: 0
+                      yellow: 20
+                      green: 35
+                  - type: glance
+                    entities:
+                      - entity: sensor.stbd_engine_load
+                        name: Load
+                      - entity: sensor.stbd_alternator
+                        name: Alt
+                      - entity: sensor.stbd_fuel_rate
+                        name: Fuel
+                      - entity: sensor.stbd_run_time
+                        name: Hours
+
+      # --- NAVIGATION & ENVIRONMENT ---
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "### Navigation & Environment"
+          - type: horizontal-stack
+            cards:
+              - type: gauge
+                entity: sensor.boat_speed_over_ground
+                name: SOG
+                min: 0
+                max: 30
+                needle: true
+              - type: gauge
+                entity: sensor.depth_below_keel
+                name: Depth
+                min: 0
+                max: 50
+                needle: true
+                severity:
+                  red: 0
+                  yellow: 6
+                  green: 15
+              - type: gauge
+                entity: sensor.wind_speed_apparent
+                name: Wind Speed
+                min: 0
+                max: 50
+                needle: true
+                severity:
+                  green: 0
+                  yellow: 20
+                  red: 35
+
+          - type: glance
+            entities:
+              - entity: sensor.water_temperature
+                name: Water Temp
+              - entity: sensor.wind_angle_apparent
+                name: Wind Angle
+              - entity: sensor.house_battery_voltage
+                name: House Battery
+
+  # ============================================================
+  # View 2: ENGINES detail — bigger gauges, more parameters
+  # ============================================================
+  - title: Engines
+    path: engines
+    icon: mdi:engine
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: vertical-stack
+            cards:
+              - type: markdown
+                content: "## Port Engine"
+              - type: gauge
+                entity: sensor.port_engine_rpm
+                name: RPM
+                min: 0
+                max: 4500
+                needle: true
+                severity:
+                  green: 600
+                  yellow: 3500
+                  red: 4200
+              - type: entities
+                title: Telemetry
+                show_header_toggle: false
+                entities:
+                  - entity: sensor.port_coolant_temp
+                    name: Coolant temperature
+                  - entity: sensor.port_oil_pressure
+                    name: Oil pressure
+                  - entity: sensor.port_engine_load
+                    name: Engine load
+                  - entity: sensor.port_alternator
+                    name: Alternator
+                  - entity: sensor.port_fuel_rate
+                    name: Fuel rate
+                  - entity: sensor.port_run_time
+                    name: Run hours
+              - type: history-graph
+                title: Port — last hour
+                hours_to_show: 1
+                entities:
+                  - entity: sensor.port_engine_rpm
+                    name: RPM
+                  - entity: sensor.port_coolant_temp
+                    name: Coolant
+
+          - type: vertical-stack
+            cards:
+              - type: markdown
+                content: "## Starboard Engine"
+              - type: gauge
+                entity: sensor.stbd_engine_rpm
+                name: RPM
+                min: 0
+                max: 4500
+                needle: true
+                severity:
+                  green: 600
+                  yellow: 3500
+                  red: 4200
+              - type: entities
+                title: Telemetry
+                show_header_toggle: false
+                entities:
+                  - entity: sensor.stbd_coolant_temp
+                    name: Coolant temperature
+                  - entity: sensor.stbd_oil_pressure
+                    name: Oil pressure
+                  - entity: sensor.stbd_engine_load
+                    name: Engine load
+                  - entity: sensor.stbd_alternator
+                    name: Alternator
+                  - entity: sensor.stbd_fuel_rate
+                    name: Fuel rate
+                  - entity: sensor.stbd_run_time
+                    name: Run hours
+              - type: history-graph
+                title: Starboard — last hour
+                hours_to_show: 1
+                entities:
+                  - entity: sensor.stbd_engine_rpm
+                    name: RPM
+                  - entity: sensor.stbd_coolant_temp
+                    name: Coolant
+
+  # ============================================================
+  # View 3: TOLLY — voice + health + service detail
+  # ============================================================
+  - title: Tolly
+    path: tolly
+    icon: mdi:microphone
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: button
+            name: Talk to Tolly
+            icon: mdi:microphone
+            icon_height: 90px
+            show_name: true
+            show_icon: true
+            tap_action:
+              action: call-service
+              service: rest_command.tolly_talk
+              data: {}
+
+          - type: entities
+            title: Conversation
+            entities:
+              - entity: input_boolean.tolly_conversation_mode
+                name: Conversation mode (hands-free)
+
+          - type: entity
+            entity: binary_sensor.tolly_healthy
+            name: Tolly health
+            icon: mdi:robot-happy
+
+          - type: entities
+            title: Service health detail
+            show_header_toggle: false
+            entities:
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: mic
+                name: Microphone
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: speaker
+                name: Speaker
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: ha_reachable
+                name: HA reachable
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: gemini_reachable
+                name: Gemini reachable
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: model
+                name: Model in use
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: model_valid
+                name: Model valid
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: exposed_entity_count
+                name: Exposed entities
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: conv_mode_active
+                name: Conversation mode active
+              - type: attribute
+                entity: binary_sensor.tolly_healthy
+                attribute: uptime_s
+                name: Service uptime (s)
