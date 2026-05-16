@@ -68,14 +68,30 @@ views:
                       red: 0
                       yellow: 20
                       green: 35
+                  - type: gauge
+                    entity: sensor.port_engine_load
+                    name: Port Load
+                    min: 0
+                    max: 100
+                    needle: true
+                    severity:
+                      green: 0
+                      yellow: 70
+                      red: 90
+                  - type: gauge
+                    entity: sensor.port_fuel_rate
+                    name: Port Fuel Rate
+                    min: 0
+                    max: 30
+                    needle: true
+                    severity:
+                      green: 0
+                      yellow: 20
+                      red: 26
                   - type: glance
                     entities:
-                      - entity: sensor.port_engine_load
-                        name: Load
                       - entity: sensor.port_alternator
-                        name: Alt
-                      - entity: sensor.port_fuel_rate
-                        name: Fuel
+                        name: Alt V
                       - entity: sensor.port_run_time
                         name: Hours
 
@@ -112,14 +128,30 @@ views:
                       red: 0
                       yellow: 20
                       green: 35
+                  - type: gauge
+                    entity: sensor.stbd_engine_load
+                    name: Stbd Load
+                    min: 0
+                    max: 100
+                    needle: true
+                    severity:
+                      green: 0
+                      yellow: 70
+                      red: 90
+                  - type: gauge
+                    entity: sensor.stbd_fuel_rate
+                    name: Stbd Fuel Rate
+                    min: 0
+                    max: 30
+                    needle: true
+                    severity:
+                      green: 0
+                      yellow: 20
+                      red: 26
                   - type: glance
                     entities:
-                      - entity: sensor.stbd_engine_load
-                        name: Load
                       - entity: sensor.stbd_alternator
-                        name: Alt
-                      - entity: sensor.stbd_fuel_rate
-                        name: Fuel
+                        name: Alt V
                       - entity: sensor.stbd_run_time
                         name: Hours
 
