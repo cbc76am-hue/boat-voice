@@ -1,0 +1,13 @@
+[Unit]
+Description=Tolly — Synthetic nav data into Signal K via NMEA 0183 UDP (dev only)
+After=network-online.target signalk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/boat/boat-voice/scripts/tolly_nav_sim.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
