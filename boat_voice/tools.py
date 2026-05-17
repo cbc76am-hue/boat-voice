@@ -187,6 +187,27 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
             "parameters": {"type": "OBJECT", "properties": {}},
         },
         {
+            "name": "GetTidesAndCurrents",
+            "description": (
+                "Read the current pre-cached NOAA tide and tidal-current "
+                "predictions for the boat's home area (La Conner / Skagit "
+                "Bay). Use this FIRST for any question about tides, currents, "
+                "slack water, or tide-driven departure timing — the data is "
+                "refreshed hourly from NOAA and cached locally so it works "
+                "offline at sea. Only fall back to Google Search if this tool "
+                "errors out, or for non-tide questions like weather forecast."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "time_window_hours": {
+                        "type": "NUMBER",
+                        "description": "How far ahead to consider (default 12). Currently informational only — the publisher always returns the next high/low and next slack/flood/ebb regardless.",
+                    },
+                },
+            },
+        },
+        {
             "name": "PlanRoute",
             "description": (
                 "Compute a safe water route from the boat's current position to a "
@@ -322,6 +343,11 @@ async def dispatch_tool(
                 return _not_configured("Signal K")
             return await _dispatch_sk_tool(name, args, sk, opencpn)
 
+        if name == "GetTidesAndCurrents":
+            if sk is None:
+                return _not_configured("Signal K")
+            return await _dispatch_tide_tool(args, sk)
+
         if name == "PlanRoute":
             if sk is None:
                 return _not_configured("Signal K")
@@ -441,6 +467,102 @@ async def _dispatch_sk_tool(
         return {"result": "Deleted." if ok else "Delete failed."}
 
     return {"error": f"Unknown SK tool: {name}"}
+
+
+# ----------------- tide + currents tool -----------------
+
+
+_M_TO_FT = 3.28084
+
+
+async def _dispatch_tide_tool(
+    args: dict[str, Any],
+    sk: SKClient,
+) -> dict[str, Any]:
+    """Read tide + currents from SK (populated by tolly-tide-publisher).
+
+    Falls back gracefully on missing paths: returns whatever is present.
+    Heights come back from SK in meters; we also include feet because the
+    boat is reasoned about in feet (charts, depth, freeboard).
+    """
+    paths = [
+        "environment.tide.heightNow",
+        "environment.tide.heightHigh",
+        "environment.tide.timeHigh",
+        "environment.tide.heightLow",
+        "environment.tide.timeLow",
+        "environment.tide.station",
+        "environment.tide.builtAt",
+        "environment.currents.station",
+        "environment.currents.timeNextSlackBefore",
+        "environment.currents.timeNextMaxFlood",
+        "environment.currents.maxFloodKnots",
+        "environment.currents.timeNextMaxEbb",
+        "environment.currents.maxEbbKnots",
+        "environment.currents.builtAt",
+    ]
+    results = await asyncio.gather(*[sk.get_path(p) for p in paths])
+    v = dict(zip(paths, results))
+
+    if all(x is None for x in results):
+        return {
+            "error": (
+                "Tide and current data are not available — the tide publisher "
+                "may not be running, or it hasn't fetched yet."
+            )
+        }
+
+    def _m_to_ft(m: Any) -> float | None:
+        try:
+            return round(float(m) * _M_TO_FT, 2)
+        except (TypeError, ValueError):
+            return None
+
+    tide_now_m = v["environment.tide.heightNow"]
+    tide_hi_m = v["environment.tide.heightHigh"]
+    tide_lo_m = v["environment.tide.heightLow"]
+
+    response: dict[str, Any] = {
+        "station": v["environment.tide.station"],
+        "data_built_at": v["environment.tide.builtAt"],
+        "time_window_hours": args.get("time_window_hours", 12),
+    }
+    if tide_now_m is not None:
+        response["height_now_m"] = round(float(tide_now_m), 3)
+        response["height_now_ft"] = _m_to_ft(tide_now_m)
+    if tide_hi_m is not None or v["environment.tide.timeHigh"] is not None:
+        response["next_high"] = {
+            "time": v["environment.tide.timeHigh"],
+            "height_m": round(float(tide_hi_m), 3) if tide_hi_m is not None else None,
+            "height_ft": _m_to_ft(tide_hi_m),
+        }
+    if tide_lo_m is not None or v["environment.tide.timeLow"] is not None:
+        response["next_low"] = {
+            "time": v["environment.tide.timeLow"],
+            "height_m": round(float(tide_lo_m), 3) if tide_lo_m is not None else None,
+            "height_ft": _m_to_ft(tide_lo_m),
+        }
+
+    current_block: dict[str, Any] = {
+        "station": v["environment.currents.station"],
+        "data_built_at": v["environment.currents.builtAt"],
+    }
+    if v["environment.currents.timeNextSlackBefore"] is not None:
+        current_block["next_slack"] = v["environment.currents.timeNextSlackBefore"]
+    if v["environment.currents.timeNextMaxFlood"] is not None or v["environment.currents.maxFloodKnots"] is not None:
+        current_block["next_max_flood"] = {
+            "time": v["environment.currents.timeNextMaxFlood"],
+            "knots": v["environment.currents.maxFloodKnots"],
+        }
+    if v["environment.currents.timeNextMaxEbb"] is not None or v["environment.currents.maxEbbKnots"] is not None:
+        current_block["next_max_ebb"] = {
+            "time": v["environment.currents.timeNextMaxEbb"],
+            "knots": v["environment.currents.maxEbbKnots"],
+        }
+    if len(current_block) > 2:  # more than just station + builtAt
+        response["current"] = current_block
+
+    return response
 
 
 async def _push_to_opencpn_waypoint(

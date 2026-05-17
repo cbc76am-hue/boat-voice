@@ -48,6 +48,31 @@ class SKClient:
             LOGGER.warning("SK ping failed: %s", err)
             return False
 
+    async def get_path(self, path: str) -> Any | None:
+        """Read a single SK path (dot-notation, e.g. 'environment.tide.heightNow').
+
+        Returns the `value` field from the SK response, or None on miss /
+        error. SK exposes scalar paths as `{value, meta, $source, timestamp}`
+        and structured paths as nested objects — we always return whatever
+        `value` is (or the whole body if no `value` key exists).
+        """
+        url_path = path.replace(".", "/")
+        try:
+            async with self._session.get(
+                f"{self.url}/signalk/v1/api/vessels/self/{url_path}",
+                headers=self._headers,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                if isinstance(data, dict) and "value" in data:
+                    return data["value"]
+                return data
+        except Exception as err:
+            LOGGER.warning("SK get_path(%s) failed: %s", path, err)
+            return None
+
     async def get_position(self) -> tuple[float, float] | None:
         """Return (latitude, longitude) in decimal degrees, or None if not available."""
         try:
