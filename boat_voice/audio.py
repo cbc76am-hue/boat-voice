@@ -261,6 +261,38 @@ class SpeakerSink:
         """Open a streaming sink for one Gemini turn. Caller must `await .finish()`."""
         return StreamingPlayback(self._device_index, self._sample_rate)
 
+    async def play_tone(
+        self,
+        freq_hz: float = 880.0,
+        duration_ms: int = 220,
+        fade_ms: int = 12,
+        volume: float = 0.6,
+    ) -> None:
+        """Short acknowledgement tone — used to signal 'Gemini is listening'
+        at the start of a talk session.  Synthesizes a sine wave with quick
+        linear fade-in/out (avoids clicks) and plays it blocking through
+        the configured output device.  Default A5 (880 Hz), 220 ms, audible
+        but not jarring; tunable per call.
+        """
+        if not self._open:
+            LOGGER.warning("play_tone called but speaker not open")
+            return
+        n = int(self._sample_rate * duration_ms / 1000)
+        fade = max(1, int(self._sample_rate * fade_ms / 1000))
+        t = np.arange(n, dtype=np.float32) / self._sample_rate
+        wave = np.sin(2.0 * np.pi * freq_hz * t).astype(np.float32) * volume
+        envelope = np.ones(n, dtype=np.float32)
+        envelope[:fade] = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        envelope[-fade:] = np.linspace(1.0, 0.0, fade, dtype=np.float32)
+        wave *= envelope
+
+        def _blocking_play() -> None:
+            sd.play(wave, samplerate=self._sample_rate,
+                    device=self._device_index, blocking=True)
+
+        LOGGER.info("ack tone: %dHz %dms vol=%.2f", int(freq_hz), duration_ms, volume)
+        await asyncio.to_thread(_blocking_play)
+
     async def play(self, pcm_bytes: bytes) -> None:
         """Blob playback (kept for the Phase B / phase-C test scripts)."""
         if not pcm_bytes:

@@ -339,6 +339,14 @@ class Orchestrator:
                     LOGGER.error("Gemini connect failed: %s", err)
                     return
 
+            # Ack tone: tells the user Gemini is listening.
+            # Fires once per /talk session (not per turn in conversation mode).
+            if self._speaker is not None:
+                try:
+                    await self._speaker.play_tone()
+                except Exception as err:
+                    LOGGER.warning("ack tone failed: %s", err)
+
             self._last_input_at = time.monotonic()
             while not self._cancel.is_set():
                 ok = await self._run_one_turn()

@@ -510,6 +510,17 @@ async def _dispatch_router_tool(
     hazards_near = int(routed.get("hazards_near") or 0)
     warnings = list(routed.get("warnings") or [])
 
+    # If the router nudged the start to find navigable water (e.g. the boat is
+    # in a marina slip the raster marks as no-go), the route polyline doesn't
+    # visually connect to the boat's actual position.  Prepend the requested
+    # start coord as the first waypoint so the chart shows the full path from
+    # where the boat is to the destination.
+    start_was_nudged = any("start nudged" in str(w).lower() for w in warnings)
+    if start_was_nudged and coords:
+        first_lat, first_lon = coords[0]
+        if abs(first_lat - float(start_lat)) > 1e-6 or abs(first_lon - float(start_lon)) > 1e-6:
+            coords = [(float(start_lat), float(start_lon))] + coords
+
     description_parts = [f"Planned by tolly-router to {dest_name}."]
     if hazards_near:
         description_parts.append(f"{hazards_near} hazard(s) within 200 m of track.")
