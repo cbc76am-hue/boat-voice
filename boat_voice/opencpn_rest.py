@@ -40,28 +40,55 @@ class OpenCPNRestClient:
         url: str,
         source: str,
         apikey: str,
-        session: aiohttp.ClientSession,
+        session: aiohttp.ClientSession | None = None,
     ) -> None:
+        """Construct a client.
+
+        Note: ``session`` is accepted for API compatibility but the client
+        will use its OWN internal session with ``TCPConnector(force_close=True)``.
+        OpenCPN's REST server doesn't handle HTTP keep-alive cleanly — the
+        FIRST request on a reused socket succeeds, subsequent ones come back
+        as result=6 (ObjectParseError).  Forcing a fresh connection per POST
+        (which is what curl does by default) is what makes back-to-back
+        pushes reliable.  Empirically tested against OpenCPN 5.10/5.11.
+        """
         self.url = url.rstrip("/")
         self.source = source
         self.apikey = apikey
-        self._session = session
-        # TLS verification disabled — OpenCPN ships a self-signed cert by default.
+        # TLS verification disabled — OpenCPN ships a self-signed cert.
         self._ssl = False
+        # Dedicated session with force-close so every POST gets a fresh socket.
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(force_close=True, ssl=False),
+        )
+        # Serialize concurrent posts at the client level so asyncio.gather
+        # of SK+OpenCPN doesn't fan two requests at OpenCPN at once.
+        self._post_lock = asyncio.Lock()
+        # Small grace period after a successful push (OpenCPN takes a moment
+        # to commit to navobj.db; sending the next request too fast can race).
+        self._post_grace_s = 0.5
+
+    async def close(self) -> None:
+        """Close the internal aiohttp session.  Idempotent."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
     @classmethod
     def from_credentials_file(
         cls,
         credentials_path: str | Path,
-        session: aiohttp.ClientSession,
+        session: aiohttp.ClientSession | None = None,
     ) -> "OpenCPNRestClient":
-        """Load `{url, source, apikey}` from a JSON file (per the project layout)."""
+        """Load `{url, source, apikey}` from a JSON file (per the project layout).
+
+        ``session`` is accepted for API compatibility but ignored — see the
+        constructor docstring for why this client owns its own session.
+        """
         creds = json.loads(Path(credentials_path).read_text())
         return cls(
             url=creds["url"],
             source=creds["source"],
             apikey=creds["apikey"],
-            session=session,
         )
 
     async def ping(self) -> bool:
@@ -105,7 +132,33 @@ class OpenCPNRestClient:
         return await self._post_gpx(gpx, activate=activate)
 
     async def _post_gpx(self, gpx_body: str, activate: bool) -> bool:
-        """POST /api/rx_object with a GPX body. Returns True only on result=0."""
+        """POST /api/rx_object with a GPX body. Returns True only on result=0.
+
+        Serialized via a lock and followed by a brief grace delay so that
+        rapid back-to-back pushes (asyncio.gather'd SK+OpenCPN pairs, or
+        sequential PlanRoute calls) don't hit OpenCPN's busy-queue path
+        where it returns result=6 (misleading "ObjectParseError" — really
+        "previous object still processing"). Retries once after the grace
+        if the first attempt comes back as ObjectParseError.
+        """
+        async with self._post_lock:
+            for attempt in (1, 2):
+                ok, code = await self._post_gpx_once(gpx_body, activate)
+                if ok:
+                    await asyncio.sleep(self._post_grace_s)
+                    return True
+                if code != 6 or attempt == 2:
+                    return False
+                LOGGER.info(
+                    "OpenCPN REST returned ObjectParseError; retrying after %.1fs",
+                    self._post_grace_s,
+                )
+                await asyncio.sleep(self._post_grace_s)
+            return False
+
+    async def _post_gpx_once(
+        self, gpx_body: str, activate: bool
+    ) -> tuple[bool, int]:
         params = {
             "apikey": self.apikey,
             "source": self.source,
@@ -114,9 +167,6 @@ class OpenCPNRestClient:
         }
         url = f"{self.url}/api/rx_object?{urlencode(params)}"
         try:
-            # OpenCPN can take many seconds to insert a multi-waypoint route
-            # while it commits to navobj.db; 30s is conservative and still
-            # well below any reasonable user-facing timeout.
             async with self._session.post(
                 url,
                 data=gpx_body.encode("utf-8"),
@@ -130,21 +180,21 @@ class OpenCPNRestClient:
                         "OpenCPN REST POST returned HTTP %d: %s",
                         resp.status, body[:200],
                     )
-                    return False
+                    return False, -1
                 data = await resp.json(content_type=None)
                 code = int(data.get("result", -1))
                 if code == 0:
-                    return True
+                    return True, 0
                 name = _RESULT_NAMES.get(code, f"unknown-{code}")
                 LOGGER.warning(
                     "OpenCPN REST rejected object: result=%d (%s)", code, name
                 )
-                return False
+                return False, code
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             LOGGER.warning(
                 "OpenCPN REST POST failed: %s (%r)", type(err).__name__, err
             )
-            return False
+            return False, -1
 
 
 _GPX_HEADER = (
