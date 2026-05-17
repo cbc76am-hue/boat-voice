@@ -62,16 +62,10 @@ state = {
     "house_v":        {"v": 12.8,   "step": 0.02,  "lo": 12.3,  "hi": 13.6},
 }
 # Home port near Shelter Bay, La Conner WA — dock position
-# HOME — just SW of the C08 Shelter Bay Marina slip, in the open water at
-# the south mouth of the Swinomish Channel (Skagit Bay opening).  Picked
-# this offset because the actual slip coordinate lands inside the marine-
-# router's 50 m no-go raster (Padilla Bay's nav basin is severed from the
-# main Salish Sea at chart resolution), so route planning from the slip
-# itself returns "disconnected basin".  This point is the closest in-main-
-# component cell to the slip (1.37 nm away) — a realistic "just left the
-# slip, heading out" position for testing PlanRoute end-to-end.
-LAT_DEG = 48.38979            # 48 23.39' N
-LON_DEG = -122.54648          # 122 32.79' W
+# HOME — C08 Shelter Bay Marina slip (matches the homeport waypoint in
+# OpenCPN's navobj.db).
+LAT_DEG = 48.38062277777778   # 48 22.84' N
+LON_DEG = -122.51490555555556 # 122 30.89' W
 
 
 def walk(key: str) -> float:
