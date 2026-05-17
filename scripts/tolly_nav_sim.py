@@ -13,11 +13,16 @@ Sentences emitted (every second):
   $WIMWV  wind angle + speed (apparent)
   $IIDBT  depth below transducer
   $IIMTW  water temperature
-  $IIXDR  house battery voltage (XDR with "U" volts type)
+
+Battery voltage takes a different path: SK's standard NMEA 0183 hooks don't
+parse XDR sentences, so we push electrical.batteries.house.voltage as a native
+SK delta over WebSocket instead. Token at ~/.config/tolly-nav-sim/sk-token.
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 import random
 import signal
 import socket
@@ -25,7 +30,14 @@ import sys
 import time
 from datetime import datetime, timezone
 
+try:
+    import websocket  # python3-websocket (websocket-client 1.7.0)
+except ImportError:
+    websocket = None
+
 DEST = ("127.0.0.1", 10120)
+SK_WS_URL = "ws://127.0.0.1:3000/signalk/v1/stream?subscribe=none"
+SK_TOKEN_FILE = os.path.expanduser("~/.config/tolly-nav-sim/sk-token")
 
 
 def nmea_checksum(body: str) -> str:
@@ -104,10 +116,69 @@ def mtw(temp_c: float) -> bytes:
     return nmea(body)
 
 
-def xdr_volts(volts: float) -> bytes:
-    # XDR transducer name "HOUSE" gets mapped by SK to electrical.batteries.house.voltage
-    body = f"IIXDR,U,{volts:.2f},V,HOUSE"
-    return nmea(body)
+class SkDeltaPublisher:
+    """Maintains a SK WebSocket connection and pushes deltas. Reconnects on
+    failure. Silently no-ops if the websocket library or token is missing —
+    callers can keep emitting NMEA without knowing SK is down."""
+
+    def __init__(self, url: str, token_path: str):
+        self.url = url
+        self.token = self._load_token(token_path)
+        self.ws: websocket.WebSocket | None = None
+
+    @staticmethod
+    def _load_token(path: str) -> str | None:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError as e:
+            print(f"sk: token load fail ({e}); SK pushes disabled", flush=True)
+            return None
+
+    def _connect(self) -> bool:
+        if websocket is None or self.token is None:
+            return False
+        try:
+            self.ws = websocket.create_connection(
+                self.url,
+                header=[f"Authorization: Bearer {self.token}"],
+                timeout=3,
+            )
+            print(f"sk: connected {self.url}", flush=True)
+            return True
+        except Exception as e:
+            print(f"sk: connect fail ({e})", flush=True)
+            self.ws = None
+            return False
+
+    def send(self, path: str, value: float) -> None:
+        if self.ws is None and not self._connect():
+            return
+        delta = {
+            "updates": [
+                {
+                    "$source": "tolly-nav-sim",
+                    "values": [{"path": path, "value": value}],
+                }
+            ]
+        }
+        try:
+            self.ws.send(json.dumps(delta))
+        except Exception as e:
+            print(f"sk: send fail ({e}); will reconnect", flush=True)
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+    def close(self) -> None:
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
 
 
 _running = True
@@ -123,6 +194,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
     print(f"tolly_nav_sim: emitting NMEA 0183 to udp://{DEST[0]}:{DEST[1]}", flush=True)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sk = SkDeltaPublisher(SK_WS_URL, SK_TOKEN_FILE)
 
     while _running:
         sentences = [
@@ -130,16 +202,17 @@ def main() -> int:
             mwv(walk("wind_angle_deg"), walk("wind_speed_kt")),
             dbt(walk("depth_ft")),
             mtw(walk("water_temp_C")),
-            xdr_volts(walk("house_v")),
         ]
         for sentence in sentences:
             try:
                 s.sendto(sentence, DEST)
             except OSError as err:
                 print(f"send fail: {err}", flush=True)
+        sk.send("electrical.batteries.house.voltage", round(walk("house_v"), 2))
         time.sleep(1.0)
 
     s.close()
+    sk.close()
     print("tolly_nav_sim: stopped", flush=True)
     return 0
 
