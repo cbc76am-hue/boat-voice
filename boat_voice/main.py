@@ -19,6 +19,7 @@ from .gemini import GeminiLiveSession
 from .ha_api import HAClient
 from .prompts import build_system_prompt
 from .server import build_app
+from .sk_api import SKClient
 from .tools import (
     build_entity_cheatsheet,
     dispatch_tool,
@@ -54,6 +55,7 @@ class Orchestrator:
         self.cfg = cfg
         self._http: aiohttp.ClientSession | None = None
         self._ha: HAClient | None = None
+        self._sk: SKClient | None = None
         self._session: GeminiLiveSession | None = None
         self._mic: MicStream | None = None
         self._speaker: SpeakerSink | None = None
@@ -76,6 +78,14 @@ class Orchestrator:
 
         self._http = aiohttp.ClientSession()
         self._ha = HAClient(self.cfg.ha.url, self.cfg.ha.long_lived_token, self._http)
+        try:
+            self._sk = SKClient.from_token_file(
+                self.cfg.sk.url, self.cfg.sk.token_path, self._http
+            )
+            LOGGER.info("Signal K configured: %s", self.cfg.sk.url)
+        except Exception as err:
+            LOGGER.warning("Signal K not configured (%s); SK-backed tools disabled", err)
+            self._sk = None
 
         # Verify Gemini model exists; fall back if needed.
         await self._verify_model()
@@ -384,6 +394,7 @@ class Orchestrator:
             self.cfg.entities.include_patterns,
             self.cfg.entities.exclude_patterns,
             healthz_provider=self._healthz,
+            sk=self._sk,
         )
 
     # -------- healthz --------

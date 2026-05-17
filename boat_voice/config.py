@@ -33,6 +33,12 @@ class HAConfig:
 
 
 @dataclass
+class SKConfig:
+    url: str
+    token_path: str
+
+
+@dataclass
 class ServerConfig:
     listen_host: str
     listen_port: int
@@ -92,6 +98,7 @@ class LoggingConfig:
 class Config:
     gemini: GeminiConfig
     ha: HAConfig
+    sk: SKConfig
     server: ServerConfig
     audio: AudioConfig
     connectivity: ConnectivityConfig
@@ -130,6 +137,13 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         ha=HAConfig(
             url=_get(raw, "ha.url", "http://localhost:8123").rstrip("/"),
             long_lived_token=_get(raw, "ha.long_lived_token", ""),
+        ),
+        sk=SKConfig(
+            url=_get(raw, "sk.url", "http://127.0.0.1:3000").rstrip("/"),
+            token_path=_get(
+                raw, "sk.token_path",
+                str(Path.home() / ".config" / "boat-voice" / "sk-token"),
+            ),
         ),
         server=ServerConfig(
             listen_host=_get(raw, "server.listen_host", "127.0.0.1"),

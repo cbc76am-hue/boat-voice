@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from .ha_api import HAClient, filter_entities
+from .sk_api import SKClient
 
 
 LOGGER = logging.getLogger(__name__)
@@ -87,6 +88,95 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
             ),
             "parameters": {"type": "OBJECT", "properties": {}},
         },
+        {
+            "name": "CreateWaypoint",
+            "description": (
+                "Save a navigation waypoint into Signal K. If the user says 'here' "
+                "or 'at our position' or omits coordinates, leave latitude and "
+                "longitude unset — they default to the boat's current GPS position. "
+                "Confirm the saved name back to the user."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "STRING", "description": "Short label for the waypoint."},
+                    "description": {"type": "STRING", "description": "Optional longer note."},
+                    "latitude": {"type": "NUMBER", "description": "Decimal degrees, positive N. Omit to use current position."},
+                    "longitude": {"type": "NUMBER", "description": "Decimal degrees, positive E (negative for W). Omit to use current position."},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "ListWaypoints",
+            "description": "List all saved waypoints. Use when the user asks 'what waypoints have we saved' or to verify a save.",
+            "parameters": {"type": "OBJECT", "properties": {}},
+        },
+        {
+            "name": "DeleteWaypoint",
+            "description": (
+                "Delete a waypoint by its UUID. Get the UUID from ListWaypoints first. "
+                "If the user names a waypoint to delete, look it up before calling this."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "uuid": {"type": "STRING", "description": "SK UUID of the waypoint."},
+                },
+                "required": ["uuid"],
+            },
+        },
+        {
+            "name": "CreateRoute",
+            "description": (
+                "Save a navigation route (ordered list of points). Each point is "
+                "(latitude, longitude) in decimal degrees. The route needs at least "
+                "two points. If the user wants the route to start at the current "
+                "position, prepend a synthetic point — call GetCurrentPosition first "
+                "and use that as the first coordinate."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {"type": "STRING"},
+                    "description": {"type": "STRING"},
+                    "points": {
+                        "type": "ARRAY",
+                        "description": "Ordered points as [[lat, lon], [lat, lon], ...].",
+                        "items": {
+                            "type": "ARRAY",
+                            "items": {"type": "NUMBER"},
+                        },
+                    },
+                },
+                "required": ["name", "points"],
+            },
+        },
+        {
+            "name": "ListRoutes",
+            "description": "List all saved routes.",
+            "parameters": {"type": "OBJECT", "properties": {}},
+        },
+        {
+            "name": "DeleteRoute",
+            "description": "Delete a route by its UUID. Get the UUID from ListRoutes first.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "uuid": {"type": "STRING"},
+                },
+                "required": ["uuid"],
+            },
+        },
+        {
+            "name": "GetCurrentPosition",
+            "description": (
+                "Read the boat's current GPS position from Signal K. Returns "
+                "latitude, longitude in decimal degrees. Use this when planning a "
+                "route that starts at the boat or when the user asks 'where are we'."
+            ),
+            "parameters": {"type": "OBJECT", "properties": {}},
+        },
     ]
 
 
@@ -119,11 +209,13 @@ async def dispatch_tool(
     include_patterns: list[str],
     exclude_patterns: list[str],
     healthz_provider,
+    sk: SKClient | None = None,
 ) -> dict[str, Any]:
     """Execute a tool call and return the response dict for Gemini.
 
     healthz_provider is a zero-arg async callable returning a dict (for DiagnoseSelf).
     set_conversation_mode is handled by the caller, not here.
+    sk is optional — SK-backed tools return an error message if not configured.
     """
     try:
         if name == "GetLiveContext":
@@ -169,11 +261,114 @@ async def dispatch_tool(
             health = await healthz_provider()
             return _diagnose_self_summary(health)
 
+        if name in (
+            "CreateWaypoint", "ListWaypoints", "DeleteWaypoint",
+            "CreateRoute", "ListRoutes", "DeleteRoute",
+            "GetCurrentPosition",
+        ):
+            if sk is None:
+                return {"error": "Signal K is not configured for this Tolly instance."}
+            return await _dispatch_sk_tool(name, args, sk)
+
     except Exception as err:
         LOGGER.exception("Tool %s failed", name)
         return {"error": f"{name} failed: {err}"}
 
     return {"error": f"Unknown tool: {name}"}
+
+
+async def _dispatch_sk_tool(
+    name: str, args: dict[str, Any], sk: SKClient
+) -> dict[str, Any]:
+    if name == "GetCurrentPosition":
+        pos = await sk.get_position()
+        if pos is None:
+            return {"error": "Current position is not available from Signal K."}
+        lat, lon = pos
+        return {"latitude": lat, "longitude": lon}
+
+    if name == "CreateWaypoint":
+        wp_name = (args.get("name") or "").strip()
+        if not wp_name:
+            return {"error": "Waypoint name is required."}
+        lat = args.get("latitude")
+        lon = args.get("longitude")
+        if lat is None or lon is None:
+            pos = await sk.get_position()
+            if pos is None:
+                return {"error": "No coordinates given and current position is unavailable."}
+            lat, lon = pos
+        uuid = await sk.create_waypoint(
+            wp_name, float(lat), float(lon), args.get("description", "") or ""
+        )
+        if uuid is None:
+            return {"error": "Signal K rejected the waypoint."}
+        return {
+            "result": f"Saved waypoint '{wp_name}' at {lat:.5f}, {lon:.5f}",
+            "uuid": uuid,
+        }
+
+    if name == "ListWaypoints":
+        wps = await sk.list_resources("waypoints")
+        if not wps:
+            return {"waypoints": [], "count": 0}
+        out = []
+        for uuid, wp in wps.items():
+            coords = (wp.get("feature") or {}).get("geometry", {}).get("coordinates") or [None, None]
+            out.append({
+                "uuid": uuid,
+                "name": wp.get("name", ""),
+                "latitude": coords[1],
+                "longitude": coords[0],
+            })
+        return {"waypoints": out, "count": len(out)}
+
+    if name == "DeleteWaypoint":
+        uuid = (args.get("uuid") or "").strip()
+        if not uuid:
+            return {"error": "Waypoint UUID is required."}
+        ok = await sk.delete_resource("waypoints", uuid)
+        return {"result": "Deleted." if ok else "Delete failed."}
+
+    if name == "CreateRoute":
+        rt_name = (args.get("name") or "").strip()
+        pts = args.get("points") or []
+        if not rt_name or len(pts) < 2:
+            return {"error": "Route needs a name and at least 2 points."}
+        coords = [(float(p[0]), float(p[1])) for p in pts]
+        uuid = await sk.create_route(
+            rt_name, coords, args.get("description", "") or ""
+        )
+        if uuid is None:
+            return {"error": "Signal K rejected the route."}
+        return {
+            "result": f"Saved route '{rt_name}' with {len(coords)} points",
+            "uuid": uuid,
+        }
+
+    if name == "ListRoutes":
+        rts = await sk.list_resources("routes")
+        if not rts:
+            return {"routes": [], "count": 0}
+        out = []
+        for uuid, rt in rts.items():
+            n_points = len((rt.get("feature") or {}).get("geometry", {}).get("coordinates") or [])
+            out.append({
+                "uuid": uuid,
+                "name": rt.get("name", ""),
+                "points": n_points,
+                "distance_m": rt.get("distance"),
+            })
+        return {"routes": out, "count": len(out)}
+
+    if name == "DeleteRoute":
+        uuid = (args.get("uuid") or "").strip()
+        if not uuid:
+            return {"error": "Route UUID is required."}
+        ok = await sk.delete_resource("routes", uuid)
+        return {"result": "Deleted." if ok else "Delete failed."}
+
+    return {"error": f"Unknown SK tool: {name}"}
 
 
 def _diagnose_self_summary(health: dict[str, Any]) -> dict[str, Any]:
