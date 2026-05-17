@@ -87,3 +87,12 @@ Sibling secret files in the same directory:
 - PlanRoute coverage is Puget Sound + San Juans (per marine-router's scope).
 - LLM-generated routes are drafts — Tolly never sends to autopilot. Human
   reviews on the chart before navigating from any route.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the optional services
+Tolly talks to, and style notes.
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
