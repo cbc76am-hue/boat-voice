@@ -39,6 +39,17 @@ class SKConfig:
 
 
 @dataclass
+class RouterConfig:
+    url: str
+    timeout_s: float
+
+
+@dataclass
+class OpenCPNConfig:
+    rest_credentials_path: str
+
+
+@dataclass
 class ServerConfig:
     listen_host: str
     listen_port: int
@@ -99,6 +110,8 @@ class Config:
     gemini: GeminiConfig
     ha: HAConfig
     sk: SKConfig
+    router: RouterConfig
+    opencpn: OpenCPNConfig
     server: ServerConfig
     audio: AudioConfig
     connectivity: ConnectivityConfig
@@ -143,6 +156,16 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             token_path=_get(
                 raw, "sk.token_path",
                 str(Path.home() / ".config" / "boat-voice" / "sk-token"),
+            ),
+        ),
+        router=RouterConfig(
+            url=_get(raw, "router.url", "http://127.0.0.1:8090").rstrip("/"),
+            timeout_s=float(_get(raw, "router.timeout_s", 5)),
+        ),
+        opencpn=OpenCPNConfig(
+            rest_credentials_path=_get(
+                raw, "opencpn.rest_credentials_path",
+                str(Path.home() / ".config" / "boat-voice" / "opencpn-rest.json"),
             ),
         ),
         server=ServerConfig(

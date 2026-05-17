@@ -17,7 +17,9 @@ from .audio import MicStream, SpeakerSink
 from .config import Config, load_config
 from .gemini import GeminiLiveSession
 from .ha_api import HAClient
+from .opencpn_rest import OpenCPNRestClient
 from .prompts import build_system_prompt
+from .router_client import RouterClient
 from .server import build_app
 from .sk_api import SKClient
 from .tools import (
@@ -56,6 +58,8 @@ class Orchestrator:
         self._http: aiohttp.ClientSession | None = None
         self._ha: HAClient | None = None
         self._sk: SKClient | None = None
+        self._router: RouterClient | None = None
+        self._opencpn: OpenCPNRestClient | None = None
         self._session: GeminiLiveSession | None = None
         self._mic: MicStream | None = None
         self._speaker: SpeakerSink | None = None
@@ -83,9 +87,39 @@ class Orchestrator:
                 self.cfg.sk.url, self.cfg.sk.token_path, self._http
             )
             LOGGER.info("Signal K configured: %s", self.cfg.sk.url)
-        except Exception as err:
-            LOGGER.warning("Signal K not configured (%s); SK-backed tools disabled", err)
+        except FileNotFoundError as err:
+            LOGGER.warning(
+                "Signal K credentials missing (%s); SK-backed tools disabled", err
+            )
             self._sk = None
+
+        self._router = RouterClient(
+            self.cfg.router.url,
+            self._http,
+            timeout_s=self.cfg.router.timeout_s,
+        )
+        router_ok = await self._router.ping()
+        LOGGER.info(
+            "tolly-router %s: %s",
+            self.cfg.router.url,
+            "ready" if router_ok else "NOT ready (graph not loaded or down)",
+        )
+
+        try:
+            self._opencpn = OpenCPNRestClient.from_credentials_file(
+                self.cfg.opencpn.rest_credentials_path, self._http
+            )
+            opencpn_ok = await self._opencpn.ping()
+            LOGGER.info(
+                "OpenCPN REST %s: %s",
+                self._opencpn.url,
+                "ready" if opencpn_ok else "NOT ready (paired? or OpenCPN down)",
+            )
+        except FileNotFoundError as err:
+            LOGGER.warning(
+                "OpenCPN REST credentials missing (%s); chart push disabled", err
+            )
+            self._opencpn = None
 
         # Verify Gemini model exists; fall back if needed.
         await self._verify_model()
@@ -395,6 +429,8 @@ class Orchestrator:
             self.cfg.entities.exclude_patterns,
             healthz_provider=self._healthz,
             sk=self._sk,
+            router=self._router,
+            opencpn=self._opencpn,
         )
 
     # -------- healthz --------

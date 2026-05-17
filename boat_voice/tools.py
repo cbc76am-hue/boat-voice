@@ -1,6 +1,7 @@
 """Tool declarations + dispatch for Tolly."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import yaml
 
 from .ha_api import HAClient, filter_entities
+from .opencpn_rest import OpenCPNRestClient
+from .router_client import RouterClient, humanize_error
 from .sk_api import SKClient
 
 
@@ -16,6 +19,12 @@ LOGGER = logging.getLogger(__name__)
 # Tool names that are not declared at the type-level here but handled in the
 # session class itself (because they mutate session state, not HA state):
 SESSION_LOCAL_TOOLS = {"set_conversation_mode"}
+
+_NO_GPS_MSG = "No GPS fix is available from Signal K right now."
+
+
+def _not_configured(service: str) -> dict[str, Any]:
+    return {"error": f"{service} is not configured for this Tolly instance."}
 
 
 def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
@@ -177,6 +186,44 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
             ),
             "parameters": {"type": "OBJECT", "properties": {}},
         },
+        {
+            "name": "PlanRoute",
+            "description": (
+                "Compute a safe water route from the boat's current position to a "
+                "destination using NOAA chart data, depth, and hazard avoidance. "
+                "Use this when the user says 'plan a route to <X>' or 'route us "
+                "to <X>' or 'how do we get to <X>'. Returns a draft route that "
+                "the user must visually review on the chart before navigating "
+                "from it. The router only covers Puget Sound and the San Juan "
+                "Islands (lat 47-49, lon -124.5 to -122)."
+            ),
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "destination_lat": {
+                        "type": "NUMBER",
+                        "description": "Destination latitude in decimal degrees, positive N.",
+                    },
+                    "destination_lon": {
+                        "type": "NUMBER",
+                        "description": "Destination longitude in decimal degrees, negative W.",
+                    },
+                    "destination_name": {
+                        "type": "STRING",
+                        "description": "Human-readable destination name, used as the route name.",
+                    },
+                    "start_lat": {
+                        "type": "NUMBER",
+                        "description": "Optional start latitude. Omit to use the boat's current GPS position from Signal K.",
+                    },
+                    "start_lon": {
+                        "type": "NUMBER",
+                        "description": "Optional start longitude. Omit to use the boat's current GPS position.",
+                    },
+                },
+                "required": ["destination_lat", "destination_lon", "destination_name"],
+            },
+        },
     ]
 
 
@@ -210,12 +257,17 @@ async def dispatch_tool(
     exclude_patterns: list[str],
     healthz_provider,
     sk: SKClient | None = None,
+    router: RouterClient | None = None,
+    opencpn: OpenCPNRestClient | None = None,
 ) -> dict[str, Any]:
     """Execute a tool call and return the response dict for Gemini.
 
     healthz_provider is a zero-arg async callable returning a dict (for DiagnoseSelf).
     set_conversation_mode is handled by the caller, not here.
     sk is optional — SK-backed tools return an error message if not configured.
+    router is optional — PlanRoute returns an error message if not configured.
+    opencpn is optional — when present, voice-created waypoints/routes are also
+    pushed to OpenCPN's Route & Mark Manager (best-effort, never blocks SK).
     """
     try:
         if name == "GetLiveContext":
@@ -267,8 +319,15 @@ async def dispatch_tool(
             "GetCurrentPosition",
         ):
             if sk is None:
-                return {"error": "Signal K is not configured for this Tolly instance."}
-            return await _dispatch_sk_tool(name, args, sk)
+                return _not_configured("Signal K")
+            return await _dispatch_sk_tool(name, args, sk, opencpn)
+
+        if name == "PlanRoute":
+            if sk is None:
+                return _not_configured("Signal K")
+            if router is None:
+                return _not_configured("Routing service")
+            return await _dispatch_router_tool(name, args, sk, router, opencpn)
 
     except Exception as err:
         LOGGER.exception("Tool %s failed", name)
@@ -278,7 +337,10 @@ async def dispatch_tool(
 
 
 async def _dispatch_sk_tool(
-    name: str, args: dict[str, Any], sk: SKClient
+    name: str,
+    args: dict[str, Any],
+    sk: SKClient,
+    opencpn: OpenCPNRestClient | None = None,
 ) -> dict[str, Any]:
     if name == "GetCurrentPosition":
         pos = await sk.get_position()
@@ -296,11 +358,17 @@ async def _dispatch_sk_tool(
         if lat is None or lon is None:
             pos = await sk.get_position()
             if pos is None:
-                return {"error": "No coordinates given and current position is unavailable."}
+                return {"error": _NO_GPS_MSG}
             lat, lon = pos
-        uuid = await sk.create_waypoint(
-            wp_name, float(lat), float(lon), args.get("description", "") or ""
+        description = args.get("description", "") or ""
+        sk_task = asyncio.create_task(
+            sk.create_waypoint(wp_name, float(lat), float(lon), description)
         )
+        ocpn_task = asyncio.create_task(
+            _push_to_opencpn_waypoint(opencpn, wp_name, float(lat), float(lon), description)
+        )
+        uuid = await sk_task
+        await ocpn_task
         if uuid is None:
             return {"error": "Signal K rejected the waypoint."}
         return {
@@ -336,9 +404,13 @@ async def _dispatch_sk_tool(
         if not rt_name or len(pts) < 2:
             return {"error": "Route needs a name and at least 2 points."}
         coords = [(float(p[0]), float(p[1])) for p in pts]
-        uuid = await sk.create_route(
-            rt_name, coords, args.get("description", "") or ""
+        description = args.get("description", "") or ""
+        sk_task = asyncio.create_task(sk.create_route(rt_name, coords, description))
+        ocpn_task = asyncio.create_task(
+            _push_to_opencpn_route(opencpn, rt_name, coords, description)
         )
+        uuid = await sk_task
+        await ocpn_task
         if uuid is None:
             return {"error": "Signal K rejected the route."}
         return {
@@ -369,6 +441,118 @@ async def _dispatch_sk_tool(
         return {"result": "Deleted." if ok else "Delete failed."}
 
     return {"error": f"Unknown SK tool: {name}"}
+
+
+async def _push_to_opencpn_waypoint(
+    opencpn: OpenCPNRestClient | None,
+    name: str,
+    lat: float,
+    lon: float,
+    description: str = "",
+) -> bool:
+    if opencpn is None:
+        return False
+    ok = await opencpn.push_waypoint(name, float(lat), float(lon), description)
+    if not ok:
+        LOGGER.warning("OpenCPN REST did not accept waypoint '%s' (SK still has it)", name)
+    return ok
+
+
+async def _push_to_opencpn_route(
+    opencpn: OpenCPNRestClient | None,
+    name: str,
+    coords: list[tuple[float, float]],
+    description: str = "",
+) -> bool:
+    if opencpn is None:
+        return False
+    ok = await opencpn.push_route(name, coords, description)
+    if not ok:
+        LOGGER.warning("OpenCPN REST did not accept route '%s' (SK still has it)", name)
+    return ok
+
+
+# ----------------- router-backed tools -----------------
+
+
+async def _dispatch_router_tool(
+    name: str,
+    args: dict[str, Any],
+    sk: SKClient,
+    router: RouterClient,
+    opencpn: OpenCPNRestClient | None,
+) -> dict[str, Any]:
+    if name != "PlanRoute":
+        return {"error": f"Unknown router tool: {name}"}
+
+    dest_lat = args.get("destination_lat")
+    dest_lon = args.get("destination_lon")
+    dest_name = (args.get("destination_name") or "").strip()
+
+    start_lat = args.get("start_lat")
+    start_lon = args.get("start_lon")
+    if start_lat is None or start_lon is None:
+        pos = await sk.get_position()
+        if pos is None:
+            return {"error": _NO_GPS_MSG}
+        start_lat, start_lon = pos
+
+    routed = await router.plan_route(
+        float(start_lat), float(start_lon),
+        float(dest_lat), float(dest_lon),
+    )
+    if not routed.get("ok"):
+        return {"error": humanize_error(routed.get("error") or "")}
+
+    waypoints = routed.get("waypoints") or []
+    coords = [(float(w["lat"]), float(w["lon"])) for w in waypoints]
+    distance_nm = float(routed.get("distance_nm") or 0.0)
+    hazards_near = int(routed.get("hazards_near") or 0)
+    warnings = list(routed.get("warnings") or [])
+
+    description_parts = [f"Planned by tolly-router to {dest_name}."]
+    if hazards_near:
+        description_parts.append(f"{hazards_near} hazard(s) within 200 m of track.")
+    for w in warnings:
+        description_parts.append(str(w))
+    description = " ".join(description_parts)
+
+    sk_task = asyncio.create_task(sk.create_route(dest_name, coords, description))
+    ocpn_task = asyncio.create_task(
+        _push_to_opencpn_route(opencpn, dest_name, coords, description)
+    )
+    uuid = await sk_task
+    chart_pushed = await ocpn_task
+    if uuid is None:
+        return {"error": "Signal K rejected the planned route."}
+
+    summary_bits = [
+        f"Planned route to {dest_name}: {len(coords)} waypoints,",
+        f"{distance_nm:.1f} nautical miles.",
+    ]
+    if hazards_near:
+        plural = "s" if hazards_near != 1 else ""
+        summary_bits.append(
+            f"{hazards_near} charted hazard{plural} within 200 meters of the track."
+        )
+    if warnings:
+        summary_bits.append("Note: " + "; ".join(str(w) for w in warnings) + ".")
+    summary_bits.append(
+        "Showing as a draft on the chart — review it before you follow it."
+    )
+    if not chart_pushed:
+        summary_bits.append(
+            "(Saved in Signal K; the chart display may need a manual refresh.)"
+        )
+
+    return {
+        "result": " ".join(summary_bits),
+        "uuid": uuid,
+        "distance_nm": round(distance_nm, 2),
+        "waypoint_count": len(coords),
+        "hazards_near": hazards_near,
+        "warnings": warnings,
+    }
 
 
 def _diagnose_self_summary(health: dict[str, Any]) -> dict[str, Any]:
