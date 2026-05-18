@@ -62,10 +62,18 @@ state = {
     "house_v":        {"v": 12.8,   "step": 0.02,  "lo": 12.3,  "hi": 13.6},
 }
 # Home port near Shelter Bay, La Conner WA — dock position
-# HOME — C08 Shelter Bay Marina slip (matches the homeport waypoint in
-# OpenCPN's navobj.db).
-LAT_DEG = 48.38062277777778   # 48 22.84' N
-LON_DEG = -122.51490555555556 # 122 30.89' W
+# Synthetic boat position — Chris's "Swinomish Channel" mark at the south
+# channel exit into Skagit Bay (the marker he dropped 2026-05-17). This is
+# where the boat realistically is when starting active navigation: after
+# motoring through the slip + Swinomish Channel, emerging into open water.
+# At this point the boat is in marine-router's main connected basin, so
+# PlanRoute works without the start-nudge dance.  The actual slip coord
+# (HOME - C08 Shelter Bay Marina, 48.38062, -122.51491) lands inside the
+# router's no-go raster because the Swinomish Channel itself is blocked
+# at 25 m resolution despite being navigable to 16 ft MLLW — that's a
+# separate v1.1 follow-up.
+LAT_DEG = 48.36131305555556   # 48 21.68' N
+LON_DEG = -122.5565875        # 122 33.40' W
 
 
 def walk(key: str) -> float:

@@ -213,10 +213,18 @@ class GeminiLiveSession:
                         self._session_handle = update.new_handle
 
                 if response.go_away:
+                    # Gemini Live caps session duration and warns us via
+                    # goAway before terminating.  Mark the session dead so
+                    # the next /talk reconnects cleanly with the saved
+                    # resumption handle, rather than the talk loop trying
+                    # to push audio onto a soon-to-be-1008'd socket.
                     LOGGER.info(
-                        "Gemini goAway received, time_left=%s",
+                        "Gemini goAway received, time_left=%s — closing "
+                        "session; next /talk will reconnect",
                         response.go_away.time_left,
                     )
+                    self._connected = False
+                    self._turn_complete_event.set()
                     break
 
                 if response.tool_call:
@@ -284,7 +292,14 @@ class GeminiLiveSession:
                     break
 
         except Exception as err:
-            LOGGER.error("Gemini receive error: %s", err)
+            # Any unexpected receive error means the WebSocket is dead or
+            # in a bad state — Gemini policy-violation closes (1008 after
+            # an un-honored goAway), network drops, etc.  Mark the session
+            # disconnected so the next /talk reconnects from the saved
+            # resumption handle instead of trying to push onto a stale
+            # socket.
+            LOGGER.error("Gemini receive error: %s; marking session dead", err)
+            self._connected = False
             self._turn_complete_event.set()
             raise
 
