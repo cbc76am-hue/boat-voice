@@ -79,6 +79,7 @@ class RouterClient:
         departure_time: str | None = None,
         depart_window: dict[str, Any] | None = None,
         extra_destinations: list[dict[str, Any]] | None = None,
+        via_destinations: list[str] | None = None,
     ) -> dict[str, Any]:
         """POST /route. Returns the parsed JSON body.
 
@@ -127,6 +128,8 @@ class RouterClient:
             body["depart_window"] = depart_window
         if extra_destinations:
             body["extra_destinations"] = extra_destinations
+        if via_destinations:
+            body["via_destinations"] = via_destinations
         # depart_window: 24 candidates worst-case × ~13s/route on long routes
         # (Shelter Bay → Roche = ~13s each) = ~5 min.  Pad to 6 min so we
         # don't kill a near-finished sweep.

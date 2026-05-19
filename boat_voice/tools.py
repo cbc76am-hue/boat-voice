@@ -273,6 +273,20 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
                             "right Swinomish exit automatically."
                         ),
                     },
+                    "via": {
+                        "type": "ARRAY",
+                        "description": (
+                            "Optional list of named via-points to pass "
+                            "through, in order.  Use when the user wants to "
+                            "stop somewhere on the way ('plan a route to "
+                            "Roche Harbor via Sucia Island').  Each entry is "
+                            "a name resolved by the same gazetteer as "
+                            "destination.  Touch-and-go: the router doesn't "
+                            "add dwell time; if the user wants an overnight "
+                            "stop they should plan two separate routes."
+                        ),
+                        "items": {"type": "STRING"},
+                    },
                     "optimize": {
                         "type": "STRING",
                         "description": (
@@ -739,6 +753,9 @@ async def _dispatch_router_tool(
     if not destination:
         return {"error": "PlanRoute requires a destination name."}
     start_name = (args.get("start") or "").strip() or None
+    via_raw = args.get("via") or []
+    via_destinations = [v.strip() for v in via_raw
+                        if isinstance(v, str) and v.strip()]
 
     # If no start name, use the boat's current GPS position; the router's
     # Swinomish detection auto-picks the right channel exit.  We only need
@@ -758,6 +775,12 @@ async def _dispatch_router_tool(
         start_coords = pos
 
     optimize = args.get("optimize") or "time"
+    if via_destinations and optimize == "depart_window":
+        return {"error": (
+            "Multi-leg via routes can't be combined with depart_window "
+            "sweep mode.  Pick a specific departure_time, or drop the via "
+            "stops, or plan separate routes for each leg."
+        )}
     departure_time = args.get("departure_time") or None
     depart_window = None
     if optimize == "depart_window":
@@ -786,6 +809,7 @@ async def _dispatch_router_tool(
         departure_time=departure_time,
         depart_window=depart_window,
         extra_destinations=extras or None,
+        via_destinations=via_destinations or None,
     )
     if not routed["ok"]:
         err_text = humanize_error(routed.get("error", ""))

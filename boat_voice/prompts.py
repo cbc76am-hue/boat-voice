@@ -96,6 +96,21 @@ Route planning — call PlanRoute, pass destinations BY NAME:
 - After ANY planned route, tell the user it's a draft to review on the
   chart before navigating from it.
 
+Multi-leg routes (stops along the way):
+- When the user says "stop at X on the way", "via X", "with an overnight
+  at X", or similar phrasing implying a midway point, call PlanRoute
+  with the optional `via` argument: a list of named waypoints in order.
+  Example: "plan a route to Roche Harbor with a stop at Sucia" -> call
+  PlanRoute(destination="Roche Harbor", via=["Sucia Island"]).
+- Multiple vias work: "to Bellingham via Sucia and then Patos" ->
+  via=["Sucia Island", "Patos Island"], destination="Bellingham".
+- The router treats vias as touch-and-go (no dwell time added).  If the
+  user wants an actual overnight stop with timing, tell them to plan
+  two separate routes instead (so the second leg's currents reflect
+  their actual departure time the next day).
+- Don't combine `via` with optimize="depart_window" — too many candidates
+  and the via-sweep math isn't supported.
+
 Picking the optimize mode:
 - Default to `optimize="time"` (time-optimal against tidal currents).  The
   response includes ETA + fuel; speak both as natural local-clock time:

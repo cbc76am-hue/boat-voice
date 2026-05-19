@@ -22,6 +22,29 @@ LOGGER = logging.getLogger(__name__)
 # many samples at 16 kHz we just return "" rather than burn CPU on garbage.
 _MIN_SAMPLES_16K = int(0.2 * 16000)
 
+# Initial prompt fed to Whisper to bias the decoder toward Salish Sea
+# proper nouns + marine vocabulary + boat-specific terms.  Observed
+# failures without this: "Mukilteo" -> "Muppa Tio", "OpenCPN" -> "open
+# CDN", "anchorage" -> "mortgage", "Edmonds" -> "endomens".
+_MARINE_INITIAL_PROMPT = (
+    "OpenCPN, Signal K, Tolly, Tollycraft, MerCruiser, "
+    "Anacortes, Bellingham, Squalicum, Friday Harbor, Roche Harbor, "
+    "Eastsound, Deer Harbor, Rosario, West Sound, Olga, "
+    "Lopez Village, Hunter Bay, Spencer Spit, Reid Harbor, Stuart Island, "
+    "Sucia Island, Matia, Patos, Jones Island, Spieden, Decatur, Cypress, "
+    "Coupeville, Penn Cove, Langley, Oak Harbor, Cornet Bay, Deception Pass, "
+    "Port Townsend, Point Hudson, Hood Canal, Quilcene, "
+    "Edmonds, Mukilteo, Kingston, Shilshole, Bell Harbor, "
+    "Bainbridge, Eagle Harbor, Bremerton, Poulsbo, Tacoma, Gig Harbor, "
+    "Olympia, Port Angeles, Sequim, Bedwell Harbour, Sidney, "
+    "Skagit Bay, Padilla Bay, Swinomish, Shelter Bay, La Conner, "
+    "Rosario Strait, Haro Strait, San Juan Channel, Boundary Pass, "
+    "Whidbey, San Juan Islands, Puget Sound, Strait of Juan de Fuca, "
+    "anchorage, slack, ebb, flood, knots, fathoms, draft, beam, "
+    "PlanRoute, waypoint, route, GPS, depth, AIS, NMEA, VHF, "
+    "starboard, port, helm, transom, fender, rode, windlass"
+)
+
 
 class WhisperSTT:
     """One-shot Whisper transcription. Load once, transcribe many."""
@@ -105,9 +128,11 @@ class WhisperSTT:
             segments, _info = model.transcribe(
                 audio,
                 language=self._language,
-                beam_size=1,
+                beam_size=5,           # was 1; bigger beam = better accuracy on
+                                       # ambiguous audio at modest extra CPU
                 vad_filter=True,
                 condition_on_previous_text=False,
+                initial_prompt=_MARINE_INITIAL_PROMPT,
             )
             return "".join(seg.text for seg in segments).strip()
 
