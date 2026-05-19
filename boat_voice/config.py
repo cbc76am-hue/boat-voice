@@ -18,12 +18,23 @@ DEFAULT_CONFIG_PATH = Path(
 
 
 @dataclass
-class GeminiConfig:
-    api_key: str
+class ClaudeConfig:
+    api_key_path: str
     model: str
     fallback_model: str
-    voice: str
-    thinking_level: str
+    max_history_messages: int
+
+
+@dataclass
+class WhisperConfig:
+    model_size: str
+    device: str
+    compute_type: str
+
+
+@dataclass
+class PiperConfig:
+    voice_path: str  # empty string -> auto-discover/download default
 
 
 @dataclass
@@ -107,7 +118,9 @@ class LoggingConfig:
 
 @dataclass
 class Config:
-    gemini: GeminiConfig
+    claude: ClaudeConfig
+    whisper: WhisperConfig
+    piper: PiperConfig
     ha: HAConfig
     sk: SKConfig
     router: RouterConfig
@@ -138,14 +151,26 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     raw = yaml.safe_load(path.read_text()) or {}
 
     return Config(
-        gemini=GeminiConfig(
-            api_key=_get(raw, "gemini.api_key", ""),
-            model=_get(raw, "gemini.model", "gemini-3.1-flash-live-preview"),
-            fallback_model=_get(
-                raw, "gemini.fallback_model", "gemini-2.5-flash-native-audio-latest"
+        claude=ClaudeConfig(
+            api_key_path=_get(
+                raw, "claude.api_key_path",
+                str(Path.home() / ".config" / "boat-voice" / "anthropic-key"),
             ),
-            voice=_get(raw, "gemini.voice", "Ursa"),
-            thinking_level=_get(raw, "gemini.thinking_level", "minimal"),
+            model=_get(raw, "claude.model", "claude-sonnet-4-5-20250929"),
+            fallback_model=_get(
+                raw, "claude.fallback_model", "claude-haiku-4-5-20251001"
+            ),
+            max_history_messages=int(
+                _get(raw, "claude.max_history_messages", 20)
+            ),
+        ),
+        whisper=WhisperConfig(
+            model_size=_get(raw, "whisper.model_size", "base.en"),
+            device=_get(raw, "whisper.device", "cpu"),
+            compute_type=_get(raw, "whisper.compute_type", "int8"),
+        ),
+        piper=PiperConfig(
+            voice_path=_get(raw, "piper.voice_path", ""),
         ),
         ha=HAConfig(
             url=_get(raw, "ha.url", "http://localhost:8123").rstrip("/"),

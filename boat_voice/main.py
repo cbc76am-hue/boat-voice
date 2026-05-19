@@ -1,10 +1,11 @@
-"""Top-level orchestrator: glue config, audio, Gemini, HA, server together."""
+"""Top-level orchestrator: STT + Claude + Piper voice path."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -14,20 +15,23 @@ import aiohttp
 from aiohttp import web
 
 from .audio import MicStream, SpeakerSink
+from .claude_llm import ClaudeLLM
 from .config import Config, load_config
-from .gemini import GeminiLiveSession
 from .ha_api import HAClient
 from .opencpn_rest import OpenCPNRestClient
 from .prompts import build_system_prompt
 from .router_client import RouterClient
 from .server import build_app
 from .sk_api import SKClient
+from .stt import WhisperSTT
 from .tools import (
     build_entity_cheatsheet,
     dispatch_tool,
     fetch_exposed_states,
-    get_tool_declarations,
+    get_tool_declarations_for_claude,
 )
+from .tts import PiperTTS
+from .voice_session import VoiceSession
 
 
 LOGGER = logging.getLogger("boat_voice")
@@ -39,19 +43,17 @@ def _configure_logging(level_name: str) -> None:
     level = getattr(logging, level_name.upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
-    # systemd-journald captures stderr cleanly; keep format minimal there.
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
-    # Avoid duplicate handlers on re-init.
     for h in list(root.handlers):
         root.removeHandler(h)
     root.addHandler(handler)
 
 
 class Orchestrator:
-    """The whole boat-voice runtime: lifecycle, talk loop, healthz."""
+    """boat-voice runtime: lifecycle, talk loop, healthz."""
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -60,28 +62,32 @@ class Orchestrator:
         self._sk: SKClient | None = None
         self._router: RouterClient | None = None
         self._opencpn: OpenCPNRestClient | None = None
-        self._session: GeminiLiveSession | None = None
+        self._stt: WhisperSTT | None = None
+        self._tts: PiperTTS | None = None
+        self._llm: ClaudeLLM | None = None
+        self._voice: VoiceSession | None = None
         self._mic: MicStream | None = None
         self._speaker: SpeakerSink | None = None
         self._talk_lock = asyncio.Lock()
         self._cancel = asyncio.Event()
         self._start_time = time.monotonic()
         self._last_input_at = time.monotonic()
-        # Health cache, refreshed by background loop + on each /healthz call.
+        self._conv_mode = bool(cfg.conversation.conversation_mode_default)
         self._health: dict[str, Any] = {}
-        # Model that was actually accepted at startup (may differ from cfg if fallback fired).
-        self._effective_model = cfg.gemini.model
-        # Entity cheatsheet used for the live system prompt.
         self._entity_cheatsheet = "(not loaded)"
 
     # -------- lifecycle --------
 
     async def start(self) -> web.AppRunner:
         _configure_logging(self.cfg.logging.level)
-        LOGGER.info("boat-voice starting (model=%s)", self.cfg.gemini.model)
+        LOGGER.info(
+            "boat-voice starting (LLM=%s, STT=%s, TTS=piper)",
+            self.cfg.claude.model, self.cfg.whisper.model_size,
+        )
 
         self._http = aiohttp.ClientSession()
         self._ha = HAClient(self.cfg.ha.url, self.cfg.ha.long_lived_token, self._http)
+
         try:
             self._sk = SKClient.from_token_file(
                 self.cfg.sk.url, self.cfg.sk.token_path, self._http
@@ -94,15 +100,14 @@ class Orchestrator:
             self._sk = None
 
         self._router = RouterClient(
-            self.cfg.router.url,
-            self._http,
+            self.cfg.router.url, self._http,
             timeout_s=self.cfg.router.timeout_s,
         )
         router_ok = await self._router.ping()
         LOGGER.info(
             "tolly-router %s: %s",
             self.cfg.router.url,
-            "ready" if router_ok else "NOT ready (graph not loaded or down)",
+            "ready" if router_ok else "NOT ready",
         )
 
         try:
@@ -113,7 +118,7 @@ class Orchestrator:
             LOGGER.info(
                 "OpenCPN REST %s: %s",
                 self._opencpn.url,
-                "ready" if opencpn_ok else "NOT ready (paired? or OpenCPN down)",
+                "ready" if opencpn_ok else "NOT ready",
             )
         except FileNotFoundError as err:
             LOGGER.warning(
@@ -121,10 +126,7 @@ class Orchestrator:
             )
             self._opencpn = None
 
-        # Verify Gemini model exists; fall back if needed.
-        await self._verify_model()
-
-        # Open audio devices (probe + start mic capture).
+        # Audio devices.
         self._speaker = SpeakerSink(
             device=self.cfg.audio.output_device,
             sample_rate=self.cfg.audio.sample_rate_out,
@@ -144,17 +146,50 @@ class Orchestrator:
         except Exception as err:
             LOGGER.error("Mic start failed (continuing degraded): %s", err)
 
-        # Cache entity cheatsheet for system prompt.
+        # Entity cheatsheet for prompt.
         await self._refresh_entity_cheatsheet()
 
-        # Build the Gemini session (not connected yet — opens lazily on first /talk).
-        self._session = self._build_session()
+        # Voice-path stack: STT, TTS, Claude.
+        self._stt = WhisperSTT(
+            model_size=self.cfg.whisper.model_size,
+            device=self.cfg.whisper.device,
+            compute_type=self.cfg.whisper.compute_type,
+        )
+        voice_path = self.cfg.piper.voice_path or None
+        self._tts = PiperTTS(voice_path=voice_path)
 
-        # Default conversation-mode state.
-        if self._session is not None:
-            self._session.set_conversation_mode(
-                self.cfg.conversation.conversation_mode_default
+        anthropic_key = self._load_anthropic_key()
+        if not anthropic_key:
+            LOGGER.error(
+                "Anthropic API key missing (path=%s); LLM disabled",
+                self.cfg.claude.api_key_path,
             )
+
+        system_prompt = build_system_prompt(
+            self._entity_cheatsheet, self.cfg.home_port.name
+        )
+        tool_decls = get_tool_declarations_for_claude(self._entity_cheatsheet)
+        self._llm = ClaudeLLM(
+            api_key=anthropic_key or "",
+            model=self.cfg.claude.model,
+            fallback_model=self.cfg.claude.fallback_model,
+            system_prompt=system_prompt,
+            tools=tool_decls,
+            max_history_messages=self.cfg.claude.max_history_messages,
+        )
+
+        self._voice = VoiceSession(
+            stt=self._stt,
+            tts=self._tts,
+            llm=self._llm,
+            mic=self._mic,
+            speaker=self._speaker,
+            mic_sample_rate=self.cfg.audio.sample_rate_in,
+            speaker_sample_rate=self.cfg.audio.sample_rate_out,
+        )
+
+        # Load STT + TTS models in background so /talk doesn't pay the cost.
+        asyncio.create_task(self._warm_voice_session(), name="voice_warm")
 
         # Start the aiohttp server.
         app = build_app(
@@ -173,10 +208,8 @@ class Orchestrator:
             self.cfg.server.listen_host, self.cfg.server.listen_port,
         )
 
-        # Background health refresher.
         asyncio.create_task(self._health_loop(), name="health_loop")
 
-        # Write the ready flag (Phase H §41).
         try:
             READY_FLAG_PATH.write_text(str(int(time.time())))
         except Exception as err:
@@ -186,8 +219,8 @@ class Orchestrator:
 
     async def stop(self) -> None:
         self._cancel.set()
-        if self._session is not None:
-            await self._session.close()
+        if self._voice is not None:
+            await self._voice.close()
         if self._mic is not None:
             self._mic.stop()
         if self._speaker is not None:
@@ -199,99 +232,30 @@ class Orchestrator:
         except Exception:
             pass
 
-    # -------- session / model --------
+    # -------- setup helpers --------
 
-    def _build_session(self) -> GeminiLiveSession:
-        system_prompt = build_system_prompt(
-            self._entity_cheatsheet, self.cfg.home_port.name
-        )
-        tool_decls = get_tool_declarations(self._entity_cheatsheet)
-        return GeminiLiveSession(
-            api_key=self.cfg.gemini.api_key,
-            model=self._effective_model,
-            voice=self.cfg.gemini.voice,
-            system_prompt=system_prompt,
-            tool_declarations=tool_decls,
-            tool_dispatcher=self._dispatch_tool,
-            input_sample_rate=self.cfg.audio.sample_rate_in,
-            silence_end_ms=self.cfg.conversation.silence_end_ms,
-            start_sensitivity=self.cfg.conversation.start_sensitivity,
-            end_sensitivity=self.cfg.conversation.end_sensitivity,
-            thinking_level=self.cfg.gemini.thinking_level,
-            on_conversation_mode_change=self._sync_conv_mode_to_ha,
-        )
-
-    async def _sync_conv_mode_to_ha(self, active: bool) -> None:
-        """When Gemini toggles conv-mode internally, mirror it to the HA toggle.
-
-        HA's state-change trigger doesn't fire when turn_on/off is called on an
-        already-matching state, so this won't loop back through the automation.
-        """
-        if self._ha is None:
-            return
-        service = "turn_on" if active else "turn_off"
+    def _load_anthropic_key(self) -> str | None:
+        # Prefer env override (systemd EnvironmentFile pattern); else file.
+        env_key = os.environ.get("ANTHROPIC_API_KEY")
+        if env_key:
+            return env_key
+        path = Path(self.cfg.claude.api_key_path)
+        if not path.is_file():
+            return None
         try:
-            await self._ha.call_service(
-                "input_boolean", service,
-                {"entity_id": "input_boolean.tolly_conversation_mode"},
-            )
-            LOGGER.info("HA input_boolean.tolly_conversation_mode -> %s", active)
-        except Exception as err:
-            LOGGER.warning("conv-mode sync to HA failed: %s", err)
+            return path.read_text().strip()
+        except OSError as err:
+            LOGGER.error("Could not read Anthropic key at %s: %s", path, err)
+            return None
 
-    async def _verify_model(self) -> None:
-        """Confirm configured model exists, fall back to cfg.gemini.fallback_model if not."""
-        assert self._http is not None
-        cfg = self.cfg.gemini
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models"
-            f"?key={cfg.api_key}"
-        )
+    async def _warm_voice_session(self) -> None:
+        if self._voice is None:
+            return
         try:
-            async with self._http.get(
-                url, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+            await self._voice.start()
+            LOGGER.info("voice session warmed (STT + TTS loaded)")
         except Exception as err:
-            LOGGER.warning(
-                "Model verification failed (network?): %s — continuing with %s",
-                err, cfg.model,
-            )
-            self._effective_model = cfg.model
-            return
-
-        live_models = [
-            m["name"].split("/")[-1]
-            for m in data.get("models", [])
-            if "bidiGenerateContent" in m.get("supportedGenerationMethods", [])
-        ]
-        wanted = cfg.model
-        if wanted in live_models:
-            LOGGER.info("Gemini model %s verified.", wanted)
-            self._effective_model = wanted
-            return
-        LOGGER.error(
-            "Configured model %s is NOT available on Gemini Live. Available: %s",
-            wanted, live_models,
-        )
-        if cfg.fallback_model in live_models:
-            LOGGER.warning("Falling back to %s", cfg.fallback_model)
-            self._effective_model = cfg.fallback_model
-            await self._notify_ha(
-                "boat-voice model fallback",
-                f"Configured model '{wanted}' missing; using '{cfg.fallback_model}' instead.",
-            )
-            return
-        LOGGER.error(
-            "Fallback %s is also missing; will use %s anyway and let connect fail loudly.",
-            cfg.fallback_model, wanted,
-        )
-        self._effective_model = wanted
-        await self._notify_ha(
-            "boat-voice model unavailable",
-            f"Model '{wanted}' and fallback '{cfg.fallback_model}' both missing.",
-        )
+            LOGGER.exception("voice session warm failed: %s", err)
 
     async def _refresh_entity_cheatsheet(self) -> None:
         assert self._ha is not None
@@ -310,38 +274,25 @@ class Orchestrator:
     # -------- HTTP callbacks --------
 
     async def _on_talk(self) -> None:
-        # Fire-and-forget: HA's REST command is non-blocking; the actual talk
-        # runs in a background task so the HTTP response returns immediately.
         asyncio.create_task(self._talk_session(), name="talk_session")
 
     async def _on_conversation_mode(self, active: bool) -> None:
-        if self._session is not None:
-            self._session.set_conversation_mode(active)
+        self._conv_mode = bool(active)
         LOGGER.info("conversation_mode -> %s (external)", active)
         if active and not self._talk_lock.locked():
-            # Kick off a session so the user can just start talking.
             asyncio.create_task(self._talk_session(), name="talk_session_conv")
 
     async def _talk_session(self) -> None:
-        """Run one or more turns under the talk lock."""
-        if self._session is None:
-            LOGGER.warning("No session built; ignoring /talk")
+        if self._voice is None:
+            LOGGER.warning("No voice session; ignoring /talk")
             return
         if self._talk_lock.locked():
             LOGGER.info("/talk arrived while previous talk still running; ignored")
             return
 
         async with self._talk_lock:
-            if not self._session.connected:
-                try:
-                    await self._session.connect()
-                except Exception as err:
-                    LOGGER.error("Gemini connect failed: %s", err)
-                    return
-
-            # Ack tone: tells the user Gemini is listening.
-            # Fires once per /talk session (not per turn in conversation mode).
-            if self._speaker is not None:
+            # Ack tone — tells operator we heard the button press.
+            if self._speaker is not None and self._speaker.is_open:
                 try:
                     await self._speaker.play_tone()
                 except Exception as err:
@@ -349,125 +300,76 @@ class Orchestrator:
 
             self._last_input_at = time.monotonic()
             while not self._cancel.is_set():
-                ok = await self._run_one_turn()
-                if not ok:
+                try:
+                    user_text = await self._voice.turn(self._dispatch_tool)
+                except Exception as err:
+                    LOGGER.exception("voice turn failed: %s", err)
                     break
-                if self._session.last_input_transcription:
+
+                if user_text:
                     self._last_input_at = time.monotonic()
-                if not self._session.conversation_mode:
+                    self._check_conv_mode_signals(user_text)
+
+                if not self._conv_mode:
                     break
                 idle = time.monotonic() - self._last_input_at
                 if idle > self.cfg.conversation.conversation_idle_timeout_s:
                     LOGGER.info(
-                        "Conversation idle %ds — exiting conversation mode", int(idle)
+                        "Conversation idle %ds — exiting conversation mode",
+                        int(idle),
                     )
-                    self._session.set_conversation_mode(False)
+                    self._conv_mode = False
                     break
 
-    async def _run_one_turn(self) -> bool:
-        """Stream mic to Gemini, stream Gemini's audio to the speaker as it arrives."""
-        assert self._session is not None and self._mic is not None
-        assert self._speaker is not None
-        self._mic.drain()
-        self._session.clear_turn_complete()
+    # Word-boundary regexes — substring match trips on "we stopped at..." etc.
+    _CONV_ENTER_RE = re.compile(
+        r"\b(let's chat|let's talk|keep talking|conversation mode)\b",
+        re.IGNORECASE,
+    )
+    _CONV_EXIT_RE = re.compile(
+        r"\b(stop|done|goodbye|thanks tolly|thank you tolly|exit conversation)\b",
+        re.IGNORECASE,
+    )
 
-        playback = self._speaker.start_stream()
-        first_chunk = False
-
-        def _on_audio_chunk(pcm: bytes) -> None:
-            nonlocal first_chunk
-            if not first_chunk:
-                first_chunk = True
-                if self.cfg.audio.mute_mic_during_playback and self._mic is not None:
-                    self._mic.set_muted(True)
-            playback.feed_nowait(pcm)
-
-        self._session.set_audio_chunk_handler(_on_audio_chunk)
-
-        receive_task = asyncio.create_task(
-            self._session.receive_loop(), name="gemini_receive"
-        )
-
-        async def _mic_forward() -> None:
-            async for chunk in self._mic.chunks():
-                if self._session is None or self._session.responding:
-                    break
-                if not self._session.connected:
-                    break
-                try:
-                    await self._session.send_audio(chunk)
-                except Exception as err:
-                    LOGGER.warning("Mic forward stopped: %s", err)
-                    break
-
-        mic_task = asyncio.create_task(_mic_forward(), name="mic_forward")
-
-        try:
-            await self._session.wait_for_turn_complete(timeout=60)
-        finally:
-            mic_task.cancel()
-            try:
-                await mic_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            if not receive_task.done():
-                receive_task.cancel()
-                try:
-                    await receive_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            self._session.set_audio_chunk_handler(None)
-
-        try:
-            await playback.finish()
-        finally:
-            if self.cfg.audio.mute_mic_during_playback and self._mic is not None:
-                self._mic.set_muted(False)
-        return True
+    def _check_conv_mode_signals(self, user_text: str) -> None:
+        text = user_text.strip()
+        enter = self._CONV_ENTER_RE.search(text)
+        if enter:
+            self._conv_mode = True
+            LOGGER.info("conv-mode -> True (match=%r in '%s')", enter.group(0), text[:60])
+            return
+        if not self._conv_mode:
+            return
+        exit_m = self._CONV_EXIT_RE.search(text)
+        # Require the exit trigger to be in the LAST sentence — protects
+        # against false positives like "we'll stop at the fuel dock first".
+        if exit_m:
+            last_sentence = re.split(r"[.!?]+", text)[-1].strip() or text
+            if self._CONV_EXIT_RE.search(last_sentence):
+                self._conv_mode = False
+                LOGGER.info("conv-mode -> False (match=%r in '%s')",
+                            exit_m.group(0), text[:60])
 
     # -------- tool dispatch --------
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         assert self._ha is not None
         return await dispatch_tool(
-            name,
-            args,
-            self._ha,
+            name, args, self._ha,
             self.cfg.entities.include_patterns,
             self.cfg.entities.exclude_patterns,
             healthz_provider=self._healthz,
-            sk=self._sk,
-            router=self._router,
-            opencpn=self._opencpn,
+            sk=self._sk, router=self._router, opencpn=self._opencpn,
         )
 
     # -------- healthz --------
 
     async def _healthz(self) -> dict[str, Any]:
         ha_ok = await self._ha.ping() if self._ha is not None else False
+        claude_ok = await self._llm.ping() if self._llm is not None else False
 
-        gemini_ok = False
-        model_valid = False
-        try:
-            assert self._http is not None
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models"
-                f"?key={self.cfg.gemini.api_key}"
-            )
-            async with self._http.get(
-                url, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                gemini_ok = resp.status == 200
-                if gemini_ok:
-                    data = await resp.json()
-                    live = [
-                        m["name"].split("/")[-1]
-                        for m in data.get("models", [])
-                        if "bidiGenerateContent" in m.get("supportedGenerationMethods", [])
-                    ]
-                    model_valid = self._effective_model in live
-        except Exception:
-            gemini_ok = False
+        stt_ready = bool(self._stt and self._stt.is_loaded) if self._stt else False
+        tts_ready = bool(self._tts and self._tts.is_loaded) if self._tts else False
 
         exposed_count = 0
         if self._ha is not None and ha_ok:
@@ -483,20 +385,21 @@ class Orchestrator:
 
         mic_ok = bool(self._mic and self._mic.is_open)
         spk_ok = bool(self._speaker and self._speaker.is_open)
-        healthy = ha_ok and gemini_ok and model_valid and mic_ok and spk_ok
+        healthy = (ha_ok and claude_ok and stt_ready and tts_ready
+                   and mic_ok and spk_ok)
 
         out: dict[str, Any] = {
             "healthy": healthy,
             "mic": mic_ok,
             "speaker": spk_ok,
             "ha_reachable": ha_ok,
-            "gemini_reachable": gemini_ok,
-            "model": self._effective_model,
-            "model_valid": model_valid,
+            "claude_reachable": claude_ok,
+            "model": self.cfg.claude.model,
+            "model_valid": claude_ok,
+            "stt_ready": stt_ready,
+            "tts_ready": tts_ready,
             "exposed_entity_count": exposed_count,
-            "conv_mode_active": bool(
-                self._session and self._session.conversation_mode
-            ),
+            "conv_mode_active": bool(self._conv_mode),
             "uptime_s": int(time.monotonic() - self._start_time),
         }
         self._health = out
@@ -510,20 +413,6 @@ class Orchestrator:
             except Exception as err:
                 LOGGER.debug("health refresh failed: %s", err)
             await asyncio.sleep(interval)
-
-    # -------- HA notifications --------
-
-    async def _notify_ha(self, title: str, message: str) -> None:
-        if self._ha is None:
-            return
-        try:
-            await self._ha.call_service(
-                "persistent_notification",
-                "create",
-                {"title": title, "message": message},
-            )
-        except Exception as err:
-            LOGGER.debug("HA notify failed: %s", err)
 
 
 async def _async_main() -> None:

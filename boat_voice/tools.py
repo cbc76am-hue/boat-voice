@@ -225,90 +225,123 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
         {
             "name": "PlanRoute",
             "description": (
-                "Compute a safe water route from the boat's current position to a "
-                "destination using NOAA chart data, depth, and hazard avoidance. "
-                "Use this when the user says 'plan a route to <X>' or 'route us "
-                "to <X>' or 'how do we get to <X>'. Returns a draft route that "
-                "the user must visually review on the chart before navigating "
-                "from it. The router only covers Puget Sound and the San Juan "
-                "Islands (lat 47-49, lon -124.5 to -122).\n\n"
+                "Compute a safe water route to a named destination using NOAA "
+                "chart data, depth, and hazard avoidance.  Use this when the "
+                "user says 'plan a route to <X>', 'route us to <X>', 'how do "
+                "we get to <X>', or any similar phrasing.  Returns a draft "
+                "route the user must visually review on the chart before "
+                "navigating from it.\n\n"
+                "Destination is a NAME (string), not coordinates — the router "
+                "has a built-in gazetteer of Salish Sea harbors and anchorages "
+                "(Friday Harbor, Roche Harbor, Anacortes, Bellingham, "
+                "Port Townsend, Olympia, Bremerton, Eastsound, Sucia, Stuart, "
+                "Coupeville, etc.).  Pass the destination by name; the router "
+                "resolves it to verified coordinates.  Never make up coordinates.\n\n"
+                "Start is also a NAME (optional).  Omit it to use the boat's "
+                "current GPS position; the router auto-routes from the right "
+                "Swinomish exit (north or south, picked by tidal current) when "
+                "the boat is inside the channel.  Pass an explicit start name "
+                "only when the user dictates one (e.g. 'plan a route from "
+                "Anacortes to Roche Harbor').\n\n"
                 "Optimization modes:\n"
-                "  - omitted or 'time': time-optimal against tidal currents, "
-                "returns ETA + fuel estimate. Default for any new ask.\n"
-                "  - 'safe': distance-optimal, no current awareness. Use "
-                "only if the user explicitly asks for the shortest path.\n"
-                "  - 'fuel': minimize fuel; identical to 'time' at the boat's "
-                "fixed cruise STW.\n"
-                "  - 'depart_window': sweep candidate departure times in the "
-                "given window and return the BEST one. Use when the user asks "
-                "'when should we leave for X' or 'best time to leave for X'."
+                "  - omitted or 'time' (default): minimize wall-clock against "
+                "tidal currents.  Returns ETA + fuel estimate.\n"
+                "  - 'safe': distance-optimal, ignores currents.  Use only "
+                "when the user explicitly asks for the shortest distance.\n"
+                "  - 'fuel': minimize fuel; equivalent to 'time' at cruise.\n"
+                "  - 'depart_window': sweep candidate departure times and "
+                "return the best.  Use when the user asks 'when should we "
+                "leave for X' or 'best time to leave for X'."
             ),
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "destination_lat": {
-                        "type": "NUMBER",
-                        "description": "Destination latitude in decimal degrees, positive N.",
-                    },
-                    "destination_lon": {
-                        "type": "NUMBER",
-                        "description": "Destination longitude in decimal degrees, negative W.",
-                    },
-                    "destination_name": {
+                    "destination": {
                         "type": "STRING",
-                        "description": "Human-readable destination name, used as the route name.",
+                        "description": (
+                            "Destination name from the router's gazetteer "
+                            "(e.g. 'Roche Harbor', 'Friday Harbor', "
+                            "'Anacortes', 'Bellingham', 'Port Townsend', "
+                            "'Olympia', 'Sucia'). Case-insensitive."
+                        ),
                     },
-                    "start_lat": {
-                        "type": "NUMBER",
-                        "description": "Optional start latitude. Omit to use the boat's current GPS position from Signal K.",
-                    },
-                    "start_lon": {
-                        "type": "NUMBER",
-                        "description": "Optional start longitude. Omit to use the boat's current GPS position.",
+                    "start": {
+                        "type": "STRING",
+                        "description": (
+                            "Optional start name. Omit to use the boat's "
+                            "current GPS position; the router will pick the "
+                            "right Swinomish exit automatically."
+                        ),
                     },
                     "optimize": {
                         "type": "STRING",
                         "description": (
-                            "Optimization mode: 'time' (default; minimize "
-                            "wall-clock against tidal currents), 'fuel' "
-                            "(== time for cruise), 'safe' (distance-only, "
-                            "no current awareness), or 'depart_window' "
-                            "(sweep candidate departures, return the best)."
+                            "Optimization mode: 'time' (default), 'fuel', "
+                            "'safe', or 'depart_window'."
                         ),
                     },
                     "departure_time": {
                         "type": "STRING",
                         "description": (
                             "ISO8601 UTC departure timestamp, e.g. "
-                            "'2026-05-18T14:00:00Z'. Used by 'time' and "
-                            "'fuel' modes; defaults to now if omitted."
+                            "'2026-05-19T18:00:00Z'. Used by 'time' and "
+                            "'fuel'; defaults to now if omitted."
                         ),
                     },
                     "depart_window_earliest": {
                         "type": "STRING",
-                        "description": (
-                            "ISO8601 UTC earliest departure for "
-                            "optimize='depart_window'. Typically 'now'."
-                        ),
+                        "description": "ISO8601 UTC earliest departure for depart_window.",
                     },
                     "depart_window_latest": {
                         "type": "STRING",
-                        "description": (
-                            "ISO8601 UTC latest departure for "
-                            "optimize='depart_window'. Typically 'now + 8h'."
-                        ),
+                        "description": "ISO8601 UTC latest departure for depart_window.",
                     },
                     "depart_window_step_minutes": {
                         "type": "NUMBER",
-                        "description": (
-                            "Step between candidate departures in minutes "
-                            "(default 15). Service caps total sweeps at 24."
-                        ),
+                        "description": "Step between candidates in minutes (default 15).",
                     },
                 },
-                "required": ["destination_lat", "destination_lon", "destination_name"],
+                "required": ["destination"],
             },
         },
+    ]
+
+
+def _to_claude_schema(decl: dict[str, Any]) -> dict[str, Any]:
+    """Translate a Gemini-shaped FunctionDeclaration into Claude's tool shape.
+
+    - rename `parameters` -> `input_schema`
+    - lowercase JSON-Schema type strings (Gemini uses upper-case, Claude wants
+      standard JSON-Schema lower-case)
+    """
+    def _lower_types(node: Any) -> Any:
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                if k == "type" and isinstance(v, str):
+                    out[k] = v.lower()
+                else:
+                    out[k] = _lower_types(v)
+            return out
+        if isinstance(node, list):
+            return [_lower_types(x) for x in node]
+        return node
+
+    return {
+        "name": decl["name"],
+        "description": decl["description"],
+        "input_schema": _lower_types(decl["parameters"]),
+    }
+
+
+def get_tool_declarations_for_claude(entity_cheatsheet: str) -> list[dict[str, Any]]:
+    """Tool declarations in Claude's tool format.  set_conversation_mode is
+    excluded because it's a session-side toggle, not a router-side action;
+    the voice session handles it directly via heuristics on the user text."""
+    return [
+        _to_claude_schema(d)
+        for d in get_tool_declarations(entity_cheatsheet)
+        if d["name"] != "set_conversation_mode"
     ]
 
 
@@ -416,10 +449,10 @@ async def dispatch_tool(
             return await _dispatch_tide_tool(args, sk)
 
         if name == "PlanRoute":
-            if sk is None:
-                return _not_configured("Signal K")
             if router is None:
                 return _not_configured("Routing service")
+            # SK may be None — _dispatch_router_tool will reject only if a
+            # GPS position is actually needed (no explicit start name supplied).
             return await _dispatch_router_tool(name, args, sk, router, opencpn)
     except (TypeError, ValueError, KeyError) as err:
         LOGGER.warning("Tool %s rejected args (%s): %r", name, err, args)
@@ -646,6 +679,35 @@ async def _push_to_opencpn_waypoint(
     return ok
 
 
+async def _fetch_sk_marks_as_extras(sk: SKClient) -> list[dict[str, Any]]:
+    """Fetch Signal K waypoints and shape them for the router's gazetteer.
+
+    Returns ``[{"name": ..., "lat": ..., "lon": ...}, ...]``.  Empty list on
+    fetch failure — the router still has its builtin gazetteer + external
+    geocoder as fallbacks, so missing marks degrades gracefully.
+    """
+    try:
+        wps = await sk.list_resources("waypoints")
+    except Exception as err:
+        LOGGER.warning("SK marks fetch failed: %s — proceeding without", err)
+        return []
+    out: list[dict[str, Any]] = []
+    for _uuid, wp in wps.items():
+        name = (wp.get("name") or "").strip()
+        if not name:
+            continue
+        coords = (wp.get("feature") or {}).get("geometry", {}).get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        try:
+            lon, lat = float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            continue
+        out.append({"name": name, "lat": lat, "lon": lon})
+    LOGGER.debug("SK marks: %d available as voice-addressable destinations", len(out))
+    return out
+
+
 async def _push_to_opencpn_route(
     opencpn: OpenCPNRestClient | None,
     name: str,
@@ -666,24 +728,34 @@ async def _push_to_opencpn_route(
 async def _dispatch_router_tool(
     name: str,
     args: dict[str, Any],
-    sk: SKClient,
+    sk: SKClient | None,
     router: RouterClient,
     opencpn: OpenCPNRestClient | None,
 ) -> dict[str, Any]:
     if name != "PlanRoute":
         return {"error": f"Unknown router tool: {name}"}
 
-    dest_lat = args.get("destination_lat")
-    dest_lon = args.get("destination_lon")
-    dest_name = (args.get("destination_name") or "").strip()
+    destination = (args.get("destination") or "").strip()
+    if not destination:
+        return {"error": "PlanRoute requires a destination name."}
+    start_name = (args.get("start") or "").strip() or None
 
-    start_lat = args.get("start_lat")
-    start_lon = args.get("start_lon")
-    if start_lat is None or start_lon is None:
+    # If no start name, use the boat's current GPS position; the router's
+    # Swinomish detection auto-picks the right channel exit.  We only need
+    # SK when the start has to come from GPS — if start_name is given, SK
+    # being unconfigured isn't a problem.
+    start_coords: tuple[float, float] | None = None
+    if start_name is None:
+        if sk is None:
+            return {"error": (
+                "I need Signal K for the boat's GPS position, or you can "
+                "name a starting point explicitly (like 'plan a route from "
+                "Anacortes to Roche Harbor')."
+            )}
         pos = await sk.get_position()
         if pos is None:
             return {"error": _NO_GPS_MSG}
-        start_lat, start_lon = pos
+        start_coords = pos
 
     optimize = args.get("optimize") or "time"
     departure_time = args.get("departure_time") or None
@@ -701,14 +773,26 @@ async def _dispatch_router_tool(
         if step is not None:
             depart_window["step_minutes"] = int(step)
 
+    # User's own waypoints from Signal K become voice-addressable destinations.
+    # Pass them as extras so the router's gazetteer can resolve names like
+    # "Foster Point" if the operator has saved that mark in OpenCPN.
+    extras = await _fetch_sk_marks_as_extras(sk) if sk is not None else []
+
     routed = await router.plan_route(
-        start_lat, start_lon, dest_lat, dest_lon,
+        destination=destination,
+        start_name=start_name,
+        start_coords=start_coords,
         optimize=optimize,
         departure_time=departure_time,
         depart_window=depart_window,
+        extra_destinations=extras or None,
     )
     if not routed["ok"]:
-        return {"error": humanize_error(routed["error"])}
+        err_text = humanize_error(routed.get("error", ""))
+        suggestions = routed.get("suggestions") or []
+        if suggestions:
+            err_text += "  Did you mean " + ", ".join(suggestions[:3]) + "?"
+        return {"error": err_text}
 
     if optimize == "depart_window":
         envelope = routed["best"]
@@ -728,17 +812,8 @@ async def _dispatch_router_tool(
     fuel_gal = envelope.get("fuel_gallons")
     best_dep = envelope.get("departure_time")
     arrival_time = envelope.get("arrival_time")
-
-    # If the router nudged the start to find navigable water (e.g. the boat is
-    # in a marina slip the raster marks as no-go), the route polyline doesn't
-    # visually connect to the boat's actual position.  Prepend the requested
-    # start coord as the first waypoint so the chart shows the full path from
-    # where the boat is to the destination.
-    start_was_nudged = any("start nudged" in str(w).lower() for w in warnings)
-    if start_was_nudged and coords:
-        first_lat, first_lon = coords[0]
-        if abs(first_lat - float(start_lat)) > 1e-6 or abs(first_lon - float(start_lon)) > 1e-6:
-            coords = [(float(start_lat), float(start_lon))] + coords
+    auto_exit = routed.get("auto_exit") or envelope.get("auto_exit")
+    dest_name = destination  # display name for chart layer
 
     description_parts = [f"Planned by tolly-router to {dest_name}."]
     if optimize != "safe":
@@ -753,19 +828,25 @@ async def _dispatch_router_tool(
         description_parts.append(str(w))
     description = " ".join(description_parts)
 
-    sk_task = asyncio.create_task(sk.create_route(dest_name, coords, description))
+    # SK may be unavailable (no token); push to OpenCPN regardless.
+    sk_task = (asyncio.create_task(sk.create_route(dest_name, coords, description))
+               if sk is not None else None)
     ocpn_task = asyncio.create_task(
         _push_to_opencpn_route(opencpn, dest_name, coords, description)
     )
-    uuid = await sk_task
+    uuid = await sk_task if sk_task is not None else None
     chart_pushed = await ocpn_task
-    if uuid is None:
+    if sk is not None and uuid is None:
         return {"error": "Signal K rejected the planned route."}
 
     summary_bits = [
         f"Planned route to {dest_name}: {len(coords)} waypoints,",
         f"{distance_nm:.1f} nautical miles.",
     ]
+    if auto_exit:
+        summary_bits.append(
+            f"Starting from the {auto_exit} Swinomish exit."
+        )
     if optimize == "depart_window" and best_dep:
         summary_bits.append(
             f"Best departure: {_iso_to_local_clock(best_dep)}, arriving "
@@ -792,8 +873,12 @@ async def _dispatch_router_tool(
         summary_bits.append(
             f"{hazards_near} charted hazard{plural} within 200 meters of the track."
         )
-    if warnings:
-        summary_bits.append("Note: " + "; ".join(str(w) for w in warnings) + ".")
+    # Filter the swin warning out of the spoken Note — we already mentioned the
+    # exit above.  Other warnings (nudge, edge hugging) are still surfaced.
+    spoken_warnings = [w for w in warnings
+                       if not str(w).startswith("start was inside Swinomish")]
+    if spoken_warnings:
+        summary_bits.append("Note: " + "; ".join(str(w) for w in spoken_warnings) + ".")
     summary_bits.append(
         "Showing as a draft on the chart — review it before you follow it."
     )
@@ -811,6 +896,8 @@ async def _dispatch_router_tool(
         "warnings": warnings,
         "optimize_mode": optimize,
     }
+    if auto_exit:
+        response["auto_exit"] = auto_exit
     if duration_min is not None:
         response["duration_minutes"] = duration_min
     if fuel_gal is not None:
@@ -832,14 +919,22 @@ def _diagnose_self_summary(health: dict[str, Any]) -> dict[str, Any]:
         parts.append("Home Assistant is reachable")
     else:
         parts.append("Home Assistant is NOT reachable")
-    if health.get("gemini_reachable"):
-        parts.append("Gemini is reachable")
+    if health.get("claude_reachable"):
+        parts.append("Claude is reachable")
     else:
-        parts.append("Gemini is NOT reachable")
+        parts.append("Claude is NOT reachable")
     if health.get("model_valid"):
         parts.append(f"model {health.get('model')} is valid")
     else:
         parts.append(f"model {health.get('model')} did NOT validate")
+    if health.get("stt_ready"):
+        parts.append("speech recognition is ready")
+    else:
+        parts.append("speech recognition is NOT ready")
+    if health.get("tts_ready"):
+        parts.append("speech synthesis is ready")
+    else:
+        parts.append("speech synthesis is NOT ready")
     if health.get("mic"):
         parts.append("microphone is open")
     else:

@@ -70,13 +70,15 @@ class RouterClient:
 
     async def plan_route(
         self,
-        start_lat: float,
-        start_lon: float,
-        end_lat: float,
-        end_lon: float,
+        destination: str | None = None,
+        *,
+        start_name: str | None = None,
+        start_coords: tuple[float, float] | None = None,
+        end_coords: tuple[float, float] | None = None,
         optimize: str = "safe",
         departure_time: str | None = None,
         depart_window: dict[str, Any] | None = None,
+        extra_destinations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """POST /route. Returns the parsed JSON body.
 
@@ -106,19 +108,30 @@ class RouterClient:
         to `{"ok": False, "error": ...}` so callers never have to catch
         exceptions.
         """
-        body: dict[str, Any] = {
-            "start": {"lat": start_lat, "lon": start_lon},
-            "end": {"lat": end_lat, "lon": end_lon},
-            "optimize": optimize,
-        }
+        body: dict[str, Any] = {"optimize": optimize}
+        if destination is not None:
+            body["destination_name"] = destination
+        elif end_coords is not None:
+            body["end"] = {"lat": end_coords[0], "lon": end_coords[1]}
+        else:
+            return {"ok": False, "error": "plan_route needs destination or end_coords"}
+
+        if start_name is not None:
+            body["start_name"] = start_name
+        elif start_coords is not None:
+            body["start"] = {"lat": start_coords[0], "lon": start_coords[1]}
+
         if departure_time is not None:
             body["departure_time"] = departure_time
         if depart_window is not None:
             body["depart_window"] = depart_window
-        # depart_window: up to 24 candidates × ~8s.  time/fuel: 60-120s for
-        # long routes against the 25m raster.  safe: typically <5s.
+        if extra_destinations:
+            body["extra_destinations"] = extra_destinations
+        # depart_window: 24 candidates worst-case × ~13s/route on long routes
+        # (Shelter Bay → Roche = ~13s each) = ~5 min.  Pad to 6 min so we
+        # don't kill a near-finished sweep.
         if optimize == "depart_window":
-            client_timeout = self._timeout_s + 200
+            client_timeout = self._timeout_s + 240
         elif optimize in ("time", "fuel"):
             client_timeout = self._timeout_s + 90
         else:
@@ -133,10 +146,14 @@ class RouterClient:
                 data = await resp.json()
                 # 400 responses carry {"error": ...} with no `ok` field.
                 # Normalize to the ok=false envelope so callers can use a
-                # uniform branch.
+                # uniform branch.  Preserve `suggestions` if present so the
+                # caller can read "did you mean X?" back to the user.
                 if resp.status >= 400 and "ok" not in data:
-                    return {"ok": False,
-                            "error": data.get("error", f"HTTP {resp.status}")}
+                    out = {"ok": False,
+                           "error": data.get("error", f"HTTP {resp.status}")}
+                    if "suggestions" in data:
+                        out["suggestions"] = data["suggestions"]
+                    return out
                 return data
         except aiohttp.ClientConnectorError as err:
             LOGGER.warning("Router unreachable: %s", err)
