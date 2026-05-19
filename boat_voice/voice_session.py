@@ -101,6 +101,8 @@ class VoiceSession:
             )
         self._frame_ms = 30
         self._frame_bytes = int(mic_sample_rate * self._frame_ms / 1000) * 2  # int16
+        # Reset per-turn at turn() start; defensive default for tests/probes.
+        self._ack_spoken_this_turn = False
 
     async def start(self) -> None:
         """Load Whisper + Piper models.  Idempotent."""
@@ -124,6 +126,10 @@ class VoiceSession:
     ) -> str:
         """Run one full turn.  Returns the user's transcribed text (for
         logging) or empty string if nothing was captured."""
+        # Reset per-turn flags.  Slow-tool ack ("Hold on, working on that
+        # route") fires at MOST once per turn, even if Claude calls
+        # PlanRoute multiple times within or across rounds.
+        self._ack_spoken_this_turn = False
         if on_state:
             await on_state("listening")
         pcm = await self._capture()
@@ -225,11 +231,16 @@ class VoiceSession:
     async def _on_tool_start(self, name: str, args: dict[str, Any]) -> None:
         """Speak a brief ack for slow tools so the operator hears feedback
         before the actual work completes.  Fast tools (no ack mapped) are
-        no-ops."""
+        no-ops.  Fires AT MOST ONCE per turn — Claude may call PlanRoute
+        several times in one utterance (multi-leg planning, retries) and
+        the operator does not want the same ack phrase 3-4 times in a row."""
+        if self._ack_spoken_this_turn:
+            return
         ack = _SLOW_TOOL_ACKS.get(name)
         if not ack:
             return
-        LOGGER.info("slow tool start: %s — speaking ack", name)
+        self._ack_spoken_this_turn = True
+        LOGGER.info("slow tool start: %s — speaking ack (first this turn)", name)
         try:
             pcm = await self._tts.synthesize(ack)
         except Exception as err:
