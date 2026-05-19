@@ -204,6 +204,10 @@ views:
   - title: Engines
     path: engines
     icon: mdi:engine
+    # panel:true makes the single root card span the full viewport (no
+    # Masonry column padding), giving each engine column ~15-25% more
+    # width on a typical screen.
+    panel: true
     cards:
       - type: horizontal-stack
         cards:
