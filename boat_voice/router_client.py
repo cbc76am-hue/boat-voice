@@ -130,7 +130,14 @@ class RouterClient:
                 json=body,
                 timeout=aiohttp.ClientTimeout(total=client_timeout),
             ) as resp:
-                return await resp.json()
+                data = await resp.json()
+                # 400 responses carry {"error": ...} with no `ok` field.
+                # Normalize to the ok=false envelope so callers can use a
+                # uniform branch.
+                if resp.status >= 400 and "ok" not in data:
+                    return {"ok": False,
+                            "error": data.get("error", f"HTTP {resp.status}")}
+                return data
         except aiohttp.ClientConnectorError as err:
             LOGGER.warning("Router unreachable: %s", err)
             return {"ok": False, "error": "router service unreachable"}
