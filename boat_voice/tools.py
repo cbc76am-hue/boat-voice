@@ -27,6 +27,21 @@ def _not_configured(service: str) -> dict[str, Any]:
     return {"error": f"{service} is not configured for this Tolly instance."}
 
 
+def _iso_to_local_clock(iso: str | None) -> str:
+    """Format an ISO8601 timestamp into local clock time for spoken output.
+
+    Falls back to the raw input on parse failure so we never blow up the tool
+    response; Gemini will then re-render via the structured fields anyway.
+    """
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except (TypeError, ValueError):
+        return iso
+    return dt.strftime("%-I:%M %p")
+
+
 def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
     """Return Gemini FunctionDeclaration dicts for all Tolly tools."""
     return [
@@ -216,7 +231,17 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
                 "to <X>' or 'how do we get to <X>'. Returns a draft route that "
                 "the user must visually review on the chart before navigating "
                 "from it. The router only covers Puget Sound and the San Juan "
-                "Islands (lat 47-49, lon -124.5 to -122)."
+                "Islands (lat 47-49, lon -124.5 to -122).\n\n"
+                "Optimization modes:\n"
+                "  - omitted or 'time': time-optimal against tidal currents, "
+                "returns ETA + fuel estimate. Default for any new ask.\n"
+                "  - 'safe': distance-optimal, no current awareness. Use "
+                "only if the user explicitly asks for the shortest path.\n"
+                "  - 'fuel': minimize fuel; identical to 'time' at the boat's "
+                "fixed cruise STW.\n"
+                "  - 'depart_window': sweep candidate departure times in the "
+                "given window and return the BEST one. Use when the user asks "
+                "'when should we leave for X' or 'best time to leave for X'."
             ),
             "parameters": {
                 "type": "OBJECT",
@@ -240,6 +265,45 @@ def get_tool_declarations(entity_cheatsheet: str) -> list[dict[str, Any]]:
                     "start_lon": {
                         "type": "NUMBER",
                         "description": "Optional start longitude. Omit to use the boat's current GPS position.",
+                    },
+                    "optimize": {
+                        "type": "STRING",
+                        "description": (
+                            "Optimization mode: 'time' (default; minimize "
+                            "wall-clock against tidal currents), 'fuel' "
+                            "(== time for cruise), 'safe' (distance-only, "
+                            "no current awareness), or 'depart_window' "
+                            "(sweep candidate departures, return the best)."
+                        ),
+                    },
+                    "departure_time": {
+                        "type": "STRING",
+                        "description": (
+                            "ISO8601 UTC departure timestamp, e.g. "
+                            "'2026-05-18T14:00:00Z'. Used by 'time' and "
+                            "'fuel' modes; defaults to now if omitted."
+                        ),
+                    },
+                    "depart_window_earliest": {
+                        "type": "STRING",
+                        "description": (
+                            "ISO8601 UTC earliest departure for "
+                            "optimize='depart_window'. Typically 'now'."
+                        ),
+                    },
+                    "depart_window_latest": {
+                        "type": "STRING",
+                        "description": (
+                            "ISO8601 UTC latest departure for "
+                            "optimize='depart_window'. Typically 'now + 8h'."
+                        ),
+                    },
+                    "depart_window_step_minutes": {
+                        "type": "NUMBER",
+                        "description": (
+                            "Step between candidate departures in minutes "
+                            "(default 15). Service caps total sweeps at 24."
+                        ),
                     },
                 },
                 "required": ["destination_lat", "destination_lon", "destination_name"],
@@ -290,6 +354,9 @@ async def dispatch_tool(
     opencpn is optional — when present, voice-created waypoints/routes are also
     pushed to OpenCPN's Route & Mark Manager (best-effort, never blocks SK).
     """
+    # Gemini's tool args are an external system boundary — schema validation is
+    # best-effort and hallucinated types DO show up.  Catch broadly here so a
+    # single bad arg doesn't silently kill the conversation turn.
     try:
         if name == "GetLiveContext":
             exposed = await fetch_exposed_states(ha, include_patterns, exclude_patterns)
@@ -354,10 +421,9 @@ async def dispatch_tool(
             if router is None:
                 return _not_configured("Routing service")
             return await _dispatch_router_tool(name, args, sk, router, opencpn)
-
-    except Exception as err:
-        LOGGER.exception("Tool %s failed", name)
-        return {"error": f"{name} failed: {err}"}
+    except (TypeError, ValueError, KeyError) as err:
+        LOGGER.warning("Tool %s rejected args (%s): %r", name, err, args)
+        return {"error": f"{name} could not be run: {err}"}
 
     return {"error": f"Unknown tool: {name}"}
 
@@ -619,18 +685,49 @@ async def _dispatch_router_tool(
             return {"error": _NO_GPS_MSG}
         start_lat, start_lon = pos
 
-    routed = await router.plan_route(
-        float(start_lat), float(start_lon),
-        float(dest_lat), float(dest_lon),
-    )
-    if not routed.get("ok"):
-        return {"error": humanize_error(routed.get("error") or "")}
+    optimize = args.get("optimize") or "time"
+    departure_time = args.get("departure_time") or None
+    depart_window = None
+    if optimize == "depart_window":
+        earliest = args.get("depart_window_earliest")
+        latest = args.get("depart_window_latest")
+        if not earliest or not latest:
+            return {"error": (
+                "PlanRoute with optimize='depart_window' requires "
+                "depart_window_earliest and depart_window_latest (ISO8601 UTC)."
+            )}
+        depart_window = {"earliest": earliest, "latest": latest}
+        step = args.get("depart_window_step_minutes")
+        if step is not None:
+            depart_window["step_minutes"] = int(step)
 
-    waypoints = routed.get("waypoints") or []
+    routed = await router.plan_route(
+        start_lat, start_lon, dest_lat, dest_lon,
+        optimize=optimize,
+        departure_time=departure_time,
+        depart_window=depart_window,
+    )
+    if not routed["ok"]:
+        return {"error": humanize_error(routed["error"])}
+
+    if optimize == "depart_window":
+        envelope = routed["best"]
+        alternatives = routed.get("alternatives", [])
+        candidates_evaluated = routed.get("candidates_evaluated", 0)
+    else:
+        envelope = routed
+        alternatives = []
+        candidates_evaluated = None
+
+    waypoints = envelope["waypoints"]
     coords = [(float(w["lat"]), float(w["lon"])) for w in waypoints]
-    distance_nm = float(routed.get("distance_nm") or 0.0)
-    hazards_near = int(routed.get("hazards_near") or 0)
-    warnings = list(routed.get("warnings") or [])
+    distance_nm = float(envelope["distance_nm"])
+    hazards_near = int(envelope["hazards_near"])
+    warnings = list(envelope["warnings"])
+    duration_min = envelope.get("duration_minutes")
+    fuel_gal = envelope.get("fuel_gallons")
+    best_dep = envelope.get("departure_time")
+    arrival_time = envelope.get("arrival_time")
 
     # If the router nudged the start to find navigable water (e.g. the boat is
     # in a marina slip the raster marks as no-go), the route polyline doesn't
@@ -644,6 +741,12 @@ async def _dispatch_router_tool(
             coords = [(float(start_lat), float(start_lon))] + coords
 
     description_parts = [f"Planned by tolly-router to {dest_name}."]
+    if optimize != "safe":
+        description_parts.append(f"Mode={optimize}.")
+        if duration_min is not None:
+            description_parts.append(f"Est duration {duration_min:.0f} min.")
+        if fuel_gal is not None:
+            description_parts.append(f"Est fuel {fuel_gal:.1f} gal.")
     if hazards_near:
         description_parts.append(f"{hazards_near} hazard(s) within 200 m of track.")
     for w in warnings:
@@ -663,6 +766,27 @@ async def _dispatch_router_tool(
         f"Planned route to {dest_name}: {len(coords)} waypoints,",
         f"{distance_nm:.1f} nautical miles.",
     ]
+    if optimize == "depart_window" and best_dep:
+        summary_bits.append(
+            f"Best departure: {_iso_to_local_clock(best_dep)}, arriving "
+            f"{_iso_to_local_clock(arrival_time)}, "
+            f"{duration_min:.0f} minutes underway, {fuel_gal:.1f} gallons."
+        )
+        if alternatives:
+            worst = max(
+                (a.get("duration_minutes") or 0 for a in alternatives),
+                default=0,
+            )
+            if worst and duration_min and worst - duration_min > 1.0:
+                summary_bits.append(
+                    f"Worst candidate in window was {worst:.0f} min — "
+                    f"that's a {worst - duration_min:.0f} minute saving."
+                )
+    elif optimize in ("time", "fuel") and duration_min is not None:
+        summary_bits.append(
+            f"ETA {_iso_to_local_clock(arrival_time)}, "
+            f"{duration_min:.0f} minutes underway, {fuel_gal:.1f} gallons."
+        )
     if hazards_near:
         plural = "s" if hazards_near != 1 else ""
         summary_bits.append(
@@ -678,14 +802,27 @@ async def _dispatch_router_tool(
             "(Saved in Signal K; the chart display may need a manual refresh.)"
         )
 
-    return {
+    response: dict[str, Any] = {
         "result": " ".join(summary_bits),
         "uuid": uuid,
         "distance_nm": round(distance_nm, 2),
         "waypoint_count": len(coords),
         "hazards_near": hazards_near,
         "warnings": warnings,
+        "optimize_mode": optimize,
     }
+    if duration_min is not None:
+        response["duration_minutes"] = duration_min
+    if fuel_gal is not None:
+        response["fuel_gallons"] = fuel_gal
+    if best_dep is not None:
+        response["departure_time"] = best_dep
+    if arrival_time is not None:
+        response["arrival_time"] = arrival_time
+    if optimize == "depart_window":
+        response["candidates_evaluated"] = candidates_evaluated
+        response["alternatives"] = alternatives
+    return response
 
 
 def _diagnose_self_summary(health: dict[str, Any]) -> dict[str, Any]:

@@ -35,8 +35,6 @@ _ERROR_MAP = {
 
 def humanize_error(err: str) -> str:
     """Map a router error string to a Tolly-friendly version."""
-    if not err:
-        return "I couldn't plan that route — unknown error."
     key = err.strip().lower()
     return _ERROR_MAP.get(key, f"I couldn't plan that route: {err}.")
 
@@ -76,38 +74,62 @@ class RouterClient:
         start_lon: float,
         end_lat: float,
         end_lon: float,
+        optimize: str = "safe",
+        departure_time: str | None = None,
+        depart_window: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """POST /route. Returns the parsed JSON body.
 
-        On success the dict has `ok=True` plus `waypoints`, `distance_nm`,
-        `hazards_near`, `warnings`. On a routing-level failure the service
-        still returns HTTP 200 with `ok=False` and an `error` string. Network
-        / unreachable failures are converted to `{"ok": False, "error": ...}`
-        so callers never have to catch exceptions.
+        Args:
+            start_lat / start_lon / end_lat / end_lon: endpoints.
+            optimize: one of "safe" (v1 distance), "time" (v2 spatio-
+                      temporal min-time), "fuel" (== time for fixed-STW
+                      cruise), or "depart_window" (sweep candidate
+                      departures and return the best).
+            departure_time: ISO8601 (UTC, e.g. "2026-05-18T14:00:00Z"),
+                            used by "time" and "fuel" modes.  Defaults
+                            to "now" if omitted.
+            depart_window: required for optimize="depart_window":
+                           ``{"earliest": ..., "latest": ..., "step_minutes": 15}``.
+
+        On success the dict has `ok=True` plus mode-specific fields:
+            - safe: `waypoints`, `distance_nm`, `hazards_near`, `warnings`
+            - time / fuel: above + `optimize_mode`, `departure_time`,
+              `arrival_time`, `duration_minutes`, `fuel_gallons`,
+              optional `legs`
+            - depart_window: `optimize_mode="depart_window"`,
+              `candidates_evaluated`, `best` (a route-shaped dict),
+              `alternatives` (departure_time + duration + fuel only)
+
+        On a routing-level failure the service still returns HTTP 200
+        with `ok=False`. Network / unreachable failures are converted
+        to `{"ok": False, "error": ...}` so callers never have to catch
+        exceptions.
         """
-        body = {
-            "start": {"lat": float(start_lat), "lon": float(start_lon)},
-            "end": {"lat": float(end_lat), "lon": float(end_lon)},
-            # forward-compat params: accepted but ignored by router v1
-            "optimize": "safe",
+        body: dict[str, Any] = {
+            "start": {"lat": start_lat, "lon": start_lon},
+            "end": {"lat": end_lat, "lon": end_lon},
+            "optimize": optimize,
         }
+        if departure_time is not None:
+            body["departure_time"] = departure_time
+        if depart_window is not None:
+            body["depart_window"] = depart_window
+        # depart_window: up to 24 candidates × ~8s.  time/fuel: 60-120s for
+        # long routes against the 25m raster.  safe: typically <5s.
+        if optimize == "depart_window":
+            client_timeout = self._timeout_s + 200
+        elif optimize in ("time", "fuel"):
+            client_timeout = self._timeout_s + 90
+        else:
+            client_timeout = self._timeout_s + 30
         try:
             async with self._session.post(
                 f"{self.url}/route",
                 headers=self._headers,
                 json=body,
-                timeout=aiohttp.ClientTimeout(total=self._timeout_s + 5),
+                timeout=aiohttp.ClientTimeout(total=client_timeout),
             ) as resp:
-                # Router returns 200 even for ok=false (caller renders error).
-                if resp.status != 200:
-                    text = await resp.text()
-                    LOGGER.warning(
-                        "Router /route returned HTTP %d: %s", resp.status, text
-                    )
-                    return {
-                        "ok": False,
-                        "error": f"router returned HTTP {resp.status}",
-                    }
                 return await resp.json()
         except aiohttp.ClientConnectorError as err:
             LOGGER.warning("Router unreachable: %s", err)

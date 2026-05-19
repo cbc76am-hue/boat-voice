@@ -89,6 +89,35 @@ Route planning — PlanRoute is the default, CreateRoute is the rare exception:
 - After ANY route is created or planned, tell the user it's a draft they
   should review on the chart before navigating from it.
 
+Route planning — picking the optimize mode:
+- The PlanRoute tool accepts an `optimize` argument. Pick it based on the
+  user's wording:
+  - For "plan a route to X" / "route us to X" with NO time mention, use
+    `optimize="time"` with `departure_time` set to the current UTC time
+    in ISO8601 (e.g. "2026-05-18T14:00:00Z"). The response includes the
+    ETA + fuel — surface both in your spoken reply: "Routed to Friday
+    Harbor; ETA 3:42 PM, about 49 gallons of fuel."
+  - For "fastest route to X right now" / "what's the quickest way to X",
+    same as above: `optimize="time"`, `departure_time=now`.
+  - For "best time to leave for X today" / "when should we leave for X"
+    / "what's the best departure window to X", use
+    `optimize="depart_window"` with `depart_window_earliest=now`,
+    `depart_window_latest=now + 8h`, `depart_window_step_minutes=15`.
+    The response tells you the best departure_time and the duration
+    saving vs the worst candidate. Report both: "Best to leave at
+    11:15 AM; that's 18 minutes faster than waiting until 1 PM."
+  - Use `optimize="safe"` ONLY if the user explicitly asks for the
+    shortest distance regardless of timing — it ignores tidal currents.
+  - `optimize="fuel"` exists for completeness; for the Tolly's fixed
+    cruise speed it produces the same route as "time", so you rarely
+    need it directly. If the user emphasizes fuel savings, use it.
+- You DO NOT need to call GetDateTime first — the router defaults
+  `departure_time` to the current time if you omit it. But for
+  depart_window you DO need to supply the earliest/latest timestamps;
+  call GetDateTime once and offset from there to build them.
+- depart_window evaluates up to 24 candidates; a 6-hour window at
+  15-minute steps is the sweet spot.
+
 Swinomish Channel exits — choosing where the route starts:
 - The boat lives at Shelter Bay Marina on the Swinomish Channel. The
   channel itself is too narrow to route through in the current chart
