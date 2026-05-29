@@ -1,0 +1,164 @@
+# boat-voice configuration.
+#
+# Copy this file to ~/.config/boat-voice/config.yaml and chmod 600.
+# Fill in the secrets and paths marked TODO.
+#
+# Secrets ARE NOT stored inline in this file — they live in separate
+# mode-600 files referenced by path.  This keeps them out of git, out of
+# logs, and out of `ps` listings.
+
+# ---------------------------------------------------------------------
+# Claude (the LLM brain — cloud API)
+# ---------------------------------------------------------------------
+claude:
+  # Path to a file (mode 600) containing your Anthropic API key.  Get
+  # one at https://console.anthropic.com/.  Pay-as-you-go billing; ~$0.005
+  # per route turn, ~$1-3/month at typical boat use.
+  api_key_path: "/home/USER/.config/boat-voice/anthropic-key"  # TODO
+
+  # Pointer model IDs (no date suffix) — auto-update with each minor
+  # release.  Sonnet for primary, Haiku as the rate-limit fallback.
+  model: "claude-sonnet-4-6"
+  fallback_model: "claude-haiku-4-5"
+
+  # Conversation history cap — trimmed by full logical turn so
+  # tool_use<->tool_result pairs never split.
+  max_history_messages: 20
+
+# ---------------------------------------------------------------------
+# Whisper STT (local, faster-whisper, CPU int8)
+# ---------------------------------------------------------------------
+whisper:
+  # base.en is fast but mangles marine place names.  small.en is what
+  # the boat uses — 2x slower per turn, dramatically better accuracy.
+  model_size: "small.en"
+  device: "cpu"
+  compute_type: "int8"
+
+# ---------------------------------------------------------------------
+# Piper TTS (local, en_US-amy-medium by default)
+# ---------------------------------------------------------------------
+piper:
+  # Leave empty to auto-discover; if no voice is installed, downloads
+  # en_US-amy-medium (~63 MB) to ~/.config/boat-voice/piper-voice/ on
+  # first run.  Set explicitly to use a different Piper voice file.
+  voice_path: ""
+
+# ---------------------------------------------------------------------
+# Home Assistant
+# ---------------------------------------------------------------------
+ha:
+  url: "http://localhost:8123"
+  # Long-lived access token from HA → Profile → Security → Create Token.
+  long_lived_token: "TODO_HA_LONG_LIVED_TOKEN"  # TODO
+
+# ---------------------------------------------------------------------
+# Signal K
+# ---------------------------------------------------------------------
+sk:
+  url: "http://127.0.0.1:3000"
+  # Path to a file containing a SK JWT.  Generate with:
+  #   signalk-generate-token -u boat -e 10y -s ~/.signalk/security.json \
+  #     > ~/.config/boat-voice/sk-token
+  # then chmod 600 ~/.config/boat-voice/sk-token
+  token_path: "/home/USER/.config/boat-voice/sk-token"  # TODO
+
+# ---------------------------------------------------------------------
+# marine-router (the chart-aware route planning service)
+# ---------------------------------------------------------------------
+router:
+  url: "http://127.0.0.1:8090"
+  # Per-route HTTP timeout, before client-side mode multipliers.
+  # Mode multipliers: safe +30s, time/fuel +90s, depart_window +240s.
+  timeout_s: 120
+
+# ---------------------------------------------------------------------
+# OpenCPN REST RemoteControl
+# ---------------------------------------------------------------------
+opencpn:
+  # OpenCPN's REST credentials file.  Created via the PIN-pairing
+  # handshake on first connection — see OpenCPN docs for the
+  # request/response dance.  Contents: {"url": "...", "source": "...",
+  #                                       "apikey": "..."}
+  rest_credentials_path: "/home/USER/.config/boat-voice/opencpn-rest.json"  # TODO
+
+# ---------------------------------------------------------------------
+# HTTP server (HA talks to us here)
+# ---------------------------------------------------------------------
+server:
+  listen_host: "127.0.0.1"
+  listen_port: 8765
+
+# ---------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------
+audio:
+  # PortAudio device names (NOT PulseAudio sink names).  `pipewire` is
+  # the ALSA shim that PipeWire exposes — PipeWire decides the
+  # underlying hardware via wpctl.  Run `python -m boat_voice.devices_dump`
+  # to see what PortAudio sees on your system.
+  input_device: "pipewire"
+  output_device: "pipewire"
+  sample_rate_in: 16000        # Whisper expects 16 kHz mono
+  sample_rate_out: 24000       # Piper at 22050 is resampled to this
+  input_chunk_ms: 100
+  mute_mic_during_playback: true
+
+# ---------------------------------------------------------------------
+# Connectivity health checks
+# ---------------------------------------------------------------------
+connectivity:
+  # Cheap reachability ping — uses Anthropic's free /v1/models endpoint,
+  # not messages.create, so it doesn't burn tokens.
+  health_check_interval_s: 60
+
+# ---------------------------------------------------------------------
+# Conversation mode
+# ---------------------------------------------------------------------
+conversation:
+  conversation_mode_default: false
+  conversation_idle_timeout_s: 60
+
+# ---------------------------------------------------------------------
+# Home Assistant entities Tolly is allowed to see + speak about.
+# Glob patterns against entity_id.  Empty include_patterns means "all".
+# ---------------------------------------------------------------------
+entities:
+  include_patterns:
+    # Signal K marine sensors (NMEA 0183 + 2000 paths exposed via MQTT)
+    - "sensor.boat_speed_over_ground"
+    - "sensor.depth_below_keel"
+    - "sensor.water_temperature"
+    - "sensor.wind_speed_apparent"
+    - "sensor.wind_angle_apparent"
+    - "sensor.house_battery_voltage"
+    # Engine sensors (per-engine port/stbd via SK propulsion paths)
+    - "sensor.port_*"
+    - "sensor.stbd_*"
+    # Tolly self-status + user-toggleable booleans
+    - "sensor.tolly_*"
+    - "binary_sensor.tolly_*"
+    - "input_boolean.tolly_*"
+  exclude_patterns: []
+
+# ---------------------------------------------------------------------
+# Home port — used to scope chart coverage and identify "home" in the
+# system prompt.
+# ---------------------------------------------------------------------
+home_port:
+  name: "Your Marina Name, Your City, State"  # TODO
+  latitude: 48.0
+  longitude: -122.5
+
+# ---------------------------------------------------------------------
+# NOAA — used by the tide publisher (separate service in this repo's
+# scripts/tolly_tide_publisher.py)
+# ---------------------------------------------------------------------
+noaa:
+  # Find your tide station at tidesandcurrents.noaa.gov/
+  default_tide_station: "9448043"   # example: Tacoma WA
+  default_marine_zone: "PZZ133"     # example: NWS marine zone code
+
+logging:
+  level: "INFO"
+  destination: "journald"
